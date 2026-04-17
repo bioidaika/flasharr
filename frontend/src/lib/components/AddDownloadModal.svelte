@@ -1,9 +1,9 @@
 <script lang="ts">
   import { downloadStore } from "$lib/stores/downloads";
   import type { AddDownloadRequest } from "$lib/stores/downloads";
-  import Badge from "$lib/components/ui/Badge.svelte";
-  import Modal from "$lib/components/ui/Modal.svelte";
-  import Button from "$lib/components/ui/Button.svelte";
+  import { Badge } from "@media-set/core-ui";
+  import { Modal } from "@media-set/core-ui";
+  import { Button } from "@media-set/core-ui";
 
   interface Props {
     isOpen?: boolean;

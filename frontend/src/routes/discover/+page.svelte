@@ -140,8 +140,13 @@
         url = `/api/tmdb/search?q=${query}&media_type=${requestType}&page=${requestPage}`;
       } else {
         url = `/api/tmdb/discover/${requestType}?page=${requestPage}&sort_by=${requestSort}`;
-        if (fromYear) url += `&primary_release_date.gte=${fromYear}-01-01`;
-        if (toYear) url += `&primary_release_date.lte=${toYear}-12-31`;
+        
+        // Handle air dates/release dates correctly based on media type
+        const dateParam = requestType === "movie" ? "primary_release_date" : "first_air_date";
+        
+        if (fromYear) url += `&${dateParam}.gte=${fromYear}-01-01`;
+        if (toYear) url += `&${dateParam}.lte=${toYear}-12-31`;
+        
         if (selectedGenres.length > 0)
           url += `&with_genres=${selectedGenres.join(",")}`;
         if (minRating > 0) url += `&vote_average.gte=${minRating}`;
@@ -172,10 +177,35 @@
         return;
       }
 
-      const newItems = data.results || [];
+      let newItems: any[] = data.results || [];
 
       if (!Array.isArray(newItems)) {
         throw new Error("Invalid API response");
+      }
+
+      // V2: Apply client-side filters if searching (TMDB search doesn't support them well)
+      if (requestQuery.trim()) {
+        if (minRating > 0) {
+          newItems = newItems.filter((i) => (i.vote_average || 0) >= minRating);
+        }
+        if (maxRating < 10) {
+          newItems = newItems.filter((i) => (i.vote_average || 0) <= maxRating);
+        }
+        if (selectedGenres.length > 0) {
+          newItems = newItems.filter((i) =>
+            i.genre_ids?.some((id: number) => selectedGenres.includes(id)),
+          );
+        }
+        if (fromYear || toYear) {
+          newItems = newItems.filter((i) => {
+            const dateStr = i.release_date || i.first_air_date;
+            if (!dateStr) return !fromYear; // Exclude if year required but missing
+            const year = new Date(dateStr).getFullYear();
+            if (fromYear && year < parseInt(fromYear)) return false;
+            if (toYear && year > parseInt(toYear)) return false;
+            return true;
+          });
+        }
       }
 
       // Add new items directly to pool - no caching needed

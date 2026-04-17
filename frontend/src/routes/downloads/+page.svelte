@@ -22,8 +22,7 @@
     type BatchSummary,
   } from "$lib/stores/downloads";
   import { toasts } from "$lib/stores/toasts";
-  import Modal from "$lib/components/ui/Modal.svelte";
-  import Button from "$lib/components/ui/Button.svelte";
+  import { Modal, Button, Badge } from "@media-set/core-ui";
 
   // Filter state - V2 doesn't have filter tabs, just shows all downloads
   type FilterType =
@@ -140,17 +139,17 @@
   // These are updated every 2 seconds via WebSocket and have accurate global counts
   let filterCounts = $derived.by(() => {
     const downloading =
-      $engineStats.db_counts?.downloading ?? $engineStats.active_downloads;
-    const queued = $engineStats.db_counts?.queued ?? $engineStats.queued;
+      downloadStore.stats.db_counts?.downloading ?? downloadStore.stats.active_downloads;
+    const queued = downloadStore.stats.db_counts?.queued ?? downloadStore.stats.queued;
     const completed =
-      $engineStats.db_counts?.completed ?? $engineStats.completed;
-    const failed = $engineStats.db_counts?.failed ?? $engineStats.failed;
-    const paused = $engineStats.db_counts?.paused ?? $engineStats.paused;
+      downloadStore.stats.db_counts?.completed ?? downloadStore.stats.completed;
+    const failed = downloadStore.stats.db_counts?.failed ?? downloadStore.stats.failed;
+    const paused = downloadStore.stats.db_counts?.paused ?? downloadStore.stats.paused;
     const cancelled =
-      $engineStats.db_counts?.cancelled ?? $engineStats.cancelled;
+      downloadStore.stats.db_counts?.cancelled ?? downloadStore.stats.cancelled;
     // Calculate all from sum if db_counts.all is not available
     const all =
-      $engineStats.db_counts?.all ??
+      downloadStore.stats.db_counts?.all ??
       downloading + queued + completed + failed + paused + cancelled;
     return { downloading, queued, completed, failed, paused, cancelled, all };
   });
@@ -202,14 +201,14 @@
 
   // Sort icon - V2 feature (uses store state)
   function getSortIcon(col: SortColumn): string {
-    if ($paginationState.sortBy !== col) return "sort";
-    return $paginationState.sortDir === "asc" ? "expand_less" : "expand_more";
+    if (downloadStore.pagination.sortBy !== col) return "sort";
+    return downloadStore.pagination.sortDir === "asc" ? "expand_less" : "expand_more";
   }
 
   // Toggle sort - V2 feature (now uses server-side sorting)
   function toggleSort(col: SortColumn) {
-    const currentSortBy = $paginationState.sortBy;
-    const currentSortDir = $paginationState.sortDir;
+    const currentSortBy = downloadStore.pagination.sortBy;
+    const currentSortDir = downloadStore.pagination.sortDir;
 
     if (currentSortBy === col) {
       // Toggle direction
@@ -221,8 +220,8 @@
   }
 
   // Filtered downloads - now uses server-side data, only client-side filtering for tabs
-  let filteredDownloads = $derived(() => {
-    let list: DownloadTask[] = $downloads;
+  let filteredDownloads = $derived.by(() => {
+    let list: DownloadTask[] = downloadStore.downloadList;
 
     // Apply filter (client-side filter for tabs - server returns all)
     switch (currentFilter) {
@@ -259,8 +258,8 @@
     }
 
     // V3: Apply client-side priority sorting when sorting by status
-    const sortBy = $paginationState.sortBy;
-    const sortDir = $paginationState.sortDir;
+    const sortBy = downloadStore.pagination.sortBy;
+    const sortDir = downloadStore.pagination.sortDir;
 
     if (sortBy === "status") {
       // Priority-based sorting: FAILED first, COMPLETED last
@@ -302,16 +301,16 @@
   });
 
   // Use server-side pagination info
-  let totalPages = $derived($paginationState.totalPages || 1);
-  let currentPage = $derived($paginationState.page);
+  let totalPages = $derived(downloadStore.pagination.totalPages || 1);
+  let currentPage = $derived(downloadStore.pagination.page);
 
   // V5: Use server-side batch summaries instead of client-side grouping
-  let groupedDownloads = $derived(() => {
+  let groupedDownloads = $derived.by(() => {
     // Convert BatchSummary to BatchGroup interface for compatibility
-    const groups: BatchGroup[] = $batches.map((batch) => {
+    const groups: BatchGroup[] = downloadStore.batchList.map((batch) => {
       // Get batch items from cache if expanded
       let batchItems = expandedBatches.has(batch.batch_id)
-        ? $downloadStore.batchItems.get(batch.batch_id) || []
+        ? downloadStore.batchItems.get(batch.batch_id) || []
         : [];
 
       // Sort batch items to match table sorting (client-side for batch children)
@@ -347,8 +346,8 @@
 
     // Standalone downloads - filter out items that belong to batches
     // This prevents duplicates when batches are expanded
-    const batchIds = new Set($batches.map((b) => b.batch_id));
-    const standalone = $downloads.filter(
+    const batchIds = new Set(downloadStore.batchList.map((b) => b.batch_id));
+    const standalone = downloadStore.downloadList.filter(
       (d) => !d.batch_id || !batchIds.has(d.batch_id),
     );
 
@@ -356,8 +355,8 @@
   });
 
   // V6: Filter batches by search query and status filter
-  let filteredBatches = $derived(() => {
-    let batches = groupedDownloads().groups;
+  let filteredBatches = $derived.by(() => {
+    let batches = groupedDownloads.groups;
     const q = searchQuery.toLowerCase();
 
     // Apply search filter
@@ -487,10 +486,10 @@
 
   // Pagination info text - V2 style
   let paginationInfo = $derived(() => {
-    const total = $paginationState.total;
+    const total = downloadStore.pagination.total;
     if (total === 0) return "Showing 0 items";
-    const limit = $paginationState.limit;
-    const page = $paginationState.page;
+    const limit = downloadStore.pagination.limit;
+    const page = downloadStore.pagination.page;
     const start = (page - 1) * limit + 1;
     const end = Math.min(page * limit, total);
     return `Showing ${start}-${end} of ${total} items`;
@@ -565,7 +564,23 @@
   function showContextMenu(e: MouseEvent, id: string) {
     e.preventDefault();
     contextMenuId = id;
-    contextMenuPos = { x: e.clientX, y: e.clientY };
+
+    // Clamp to viewport to prevent menu from going off-screen
+    const menuWidth = 220; // based on .context-menu min-width
+    const menuHeight = 300; // estimated max height
+
+    let x = e.clientX;
+    let y = e.clientY;
+
+    if (x + menuWidth > window.innerWidth) {
+      x = Math.max(10, window.innerWidth - menuWidth - 10);
+    }
+
+    if (y + menuHeight > window.innerHeight) {
+      y = Math.max(10, window.innerHeight - menuHeight - 10);
+    }
+
+    contextMenuPos = { x, y };
   }
 
   function hideContextMenu() {
@@ -578,7 +593,23 @@
     e.preventDefault();
     e.stopPropagation();
     batchContextMenuId = batchId;
-    batchContextMenuPos = { x: e.clientX, y: e.clientY };
+
+    // Clamp to viewport to prevent menu from going off-screen
+    const menuWidth = 220;
+    const menuHeight = 250; // batch menu is shorter
+
+    let x = e.clientX;
+    let y = e.clientY;
+
+    if (x + menuWidth > window.innerWidth) {
+      x = Math.max(10, window.innerWidth - menuWidth - 10);
+    }
+
+    if (y + menuHeight > window.innerHeight) {
+      y = Math.max(10, window.innerHeight - menuHeight - 10);
+    }
+
+    batchContextMenuPos = { x, y };
   }
 
   async function handleBatchAction(action: string, batchId: string) {
@@ -599,7 +630,7 @@
           break;
         case "delete":
           // Find batch info for confirmation modal
-          const batch = filteredBatches().find((b) => b.batchId === batchId);
+          const batch = filteredBatches.find((b) => b.batchId === batchId);
           if (batch) {
             showBatchDeleteConfirm(batchId, batch.batchName, batch.totalItems);
           }
@@ -711,7 +742,7 @@
 
   // V3: Keyboard navigation handler
   function handleKeyboardNav(e: KeyboardEvent) {
-    const list = filteredDownloads();
+    const list = filteredDownloads;
     if (list.length === 0) return;
 
     // Find current index
@@ -803,7 +834,7 @@
         if (selectedRowId) {
           const task = list.find((d) => d.id === selectedRowId);
           if (task?.batch_id) {
-            const batch = filteredBatches().find(
+            const batch = filteredBatches.find(
               (b) => b.batchId === task.batch_id,
             );
             if (batch) {
@@ -828,7 +859,7 @@
 
   // V3: Track completion animations
   $effect(() => {
-    const currentDownloads = $downloads;
+    const currentDownloads = downloadStore.downloadList;
 
     for (const dl of currentDownloads) {
       const prevState = previousStates.get(dl.id);
@@ -853,7 +884,7 @@
 
   onMount(() => {
     // Sync local statusFilter with store's paginationState
-    const storeFilter = $paginationState.statusFilter;
+    const storeFilter = downloadStore.pagination.statusFilter;
     statusFilter = storeFilter ? storeFilter : "ALL";
 
     // Set Page Header - V2 style
@@ -942,7 +973,7 @@
                   <span class="th-label">Filename</span>
                   <span
                     class="material-icons sort-icon"
-                    class:active={$paginationState.sortBy === "filename"}
+                    class:active={downloadStore.pagination.sortBy === "filename"}
                     >{getSortIcon("filename")}</span
                   >
                 </div>
@@ -1131,7 +1162,7 @@
                   <span class="th-label">Size</span>
                   <span
                     class="material-icons sort-icon"
-                    class:active={$paginationState.sortBy === "size"}
+                    class:active={downloadStore.pagination.sortBy === "size"}
                     >{getSortIcon("size")}</span
                   >
                 </div>
@@ -1141,7 +1172,7 @@
                   <span class="th-label">Progress</span>
                   <span
                     class="material-icons sort-icon"
-                    class:active={$paginationState.sortBy === "progress"}
+                    class:active={downloadStore.pagination.sortBy === "progress"}
                     >{getSortIcon("progress")}</span
                   >
                 </div>
@@ -1159,7 +1190,7 @@
                   <span class="th-label">Added</span>
                   <span
                     class="material-icons sort-icon"
-                    class:active={$paginationState.sortBy === "added"}
+                    class:active={downloadStore.pagination.sortBy === "added"}
                     >{getSortIcon("added")}</span
                   >
                 </div>
@@ -1167,7 +1198,7 @@
             </tr>
           </thead>
           <tbody>
-            {#if $isLoading && $downloads.length === 0 && $batches.length === 0}
+            {#if downloadStore.loading && downloadStore.downloadList.length === 0 && downloadStore.batchList.length === 0}
               <!-- Skeleton loader rows -->
               {#each Array(5) as _, i}
                 <tr class="skeleton-row">
@@ -1197,7 +1228,7 @@
                   </td>
                 </tr>
               {/each}
-            {:else if filteredBatches().length === 0 && filteredDownloads().length === 0}
+            {:else if filteredBatches.length === 0 && filteredDownloads.length === 0}
               <!-- Empty state row -->
               <tr>
                 <td colspan="8" class="table-empty-cell">
@@ -1232,7 +1263,7 @@
               </tr>
             {:else}
               <!-- V5: Render batch groups first -->
-              {#each filteredBatches() as group (group.batchId)}
+              {#each filteredBatches as group (group.batchId)}
                 {@const batchStatus = getBatchStatus(group)}
                 {@const isExpanded = expandedBatches.has(group.batchId)}
 
@@ -1319,8 +1350,12 @@
                       >
                         <span class="filename-text">{download.filename}</span>
                         {#if download.quality}
-                          <span class="quality-badge" title={download.quality}
-                            >{download.resolution || download.quality}</span
+                          <Badge
+                            variant="purple"
+                            size="xs"
+                            class="ml-[6px]"
+                            title={download.quality}
+                            >{download.resolution || download.quality}</Badge
                           >
                         {/if}
                       </td>
@@ -1381,7 +1416,7 @@
               {/each}
 
               <!-- Standalone downloads (no batch) -->
-              {#each groupedDownloads().standalone as download (download.id)}
+              {#each groupedDownloads.standalone as download (download.id)}
                 {@const color = getStateColorV2(download.state)}
                 {@const icon = getStateIconV2(download.state)}
                 {@const isActive = isDownloadActive(download.state)}
@@ -1400,8 +1435,12 @@
                   <td class="filename-cell" title={download.filename}>
                     <span class="filename-text">{download.filename}</span>
                     {#if download.quality}
-                      <span class="quality-badge" title={download.quality}
-                        >{download.resolution || download.quality}</span
+                      <Badge
+                        variant="purple"
+                        size="xs"
+                        class="ml-[6px]"
+                        title={download.quality}
+                        >{download.resolution || download.quality}</Badge
                       >
                     {/if}
                   </td>
@@ -1551,7 +1590,7 @@
     </div>
 
     <!-- Mobile Batch Groups -->
-    {#each filteredBatches() as group (group.batchId)}
+    {#each filteredBatches as group (group.batchId)}
       {@const batchStatus = getBatchStatus(group)}
       {@const isBatchExpanded = expandedMobileBatches.has(group.batchId)}
       <div class="mobile-batch-card">
@@ -1586,8 +1625,12 @@
                   <div class="card-name">
                     {download.filename}
                     {#if download.quality}
-                      <span class="quality-badge" title={download.quality}
-                        >{download.resolution || download.quality}</span
+                      <Badge
+                        variant="purple"
+                        size="xs"
+                        class="ml-[6px]"
+                        title={download.quality}
+                        >{download.resolution || download.quality}</Badge
                       >
                     {/if}
                   </div>
@@ -1701,7 +1744,7 @@
     {/each}
 
     <!-- Mobile Individual Downloads -->
-    {#each filteredDownloads() as download (download.id)}
+    {#each filteredDownloads as download (download.id)}
       {@const color = getStateColorV2(download.state)}
       {@const isActive = isDownloadActive(download.state)}
       {@const isExpanded = expandedMobileCardId === download.id}
@@ -1714,8 +1757,12 @@
           <div class="card-name">
             {download.filename}
             {#if download.quality}
-              <span class="quality-badge" title={download.quality}
-                >{download.resolution || download.quality}</span
+              <Badge
+                variant="purple"
+                size="xs"
+                class="ml-[6px]"
+                title={download.quality}
+                >{download.resolution || download.quality}</Badge
               >
             {/if}
           </div>
@@ -1825,7 +1872,7 @@
     {/each}
 
     <!-- Empty state for mobile -->
-    {#if filteredBatches().length === 0 && filteredDownloads().length === 0}
+    {#if filteredBatches.length === 0 && filteredDownloads.length === 0}
       <div
         class="empty-state-inline"
         style="padding: 2rem; text-align: center;"
@@ -1852,8 +1899,8 @@
 <!-- V2 Style Context Menu -->
 {#if contextMenuId}
   {@const allDownloads = [
-    ...$downloads,
-    ...Array.from($downloadStore.batchItems.values()).flat(),
+    ...downloadStore.downloadList,
+    ...Array.from(downloadStore.batchItems.values()).flat(),
   ]}
   {#each allDownloads.filter((d) => d.id === contextMenuId) as download}
     <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -1999,7 +2046,7 @@
     <button
       class="context-item"
       onclick={() => {
-        const batch = filteredBatches().find(
+        const batch = filteredBatches.find(
           (b) => b.batchId === batchContextMenuId,
         );
         if (batch) showBatchDetails(batch);
@@ -2178,12 +2225,12 @@
             {detailsTask.filename}
           </h3>
           {#if detailsTask.quality}
-            <span
-              class="quality-badge quality-badge-lg"
-              title={detailsTask.quality}
+            <Badge
+              variant="purple"
+              size="md"
+              class="mt-[4px]"
+              title={detailsTask.quality}>{detailsTask.quality}</Badge
             >
-              {detailsTask.quality}
-            </span>
           {/if}
         </div>
       {/if}
@@ -3145,53 +3192,6 @@
     background: currentColor;
     opacity: 0.8;
     flex-shrink: 0;
-  }
-
-  /* Quality Badge */
-  .quality-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 2px 6px;
-    font-size: 0.52rem;
-    font-weight: 800;
-    text-transform: uppercase;
-    letter-spacing: 0.07em;
-    font-family: var(--font-mono, monospace);
-    background: rgba(168, 85, 247, 0.12);
-    color: #c084fc;
-    border: 1px solid rgba(168, 85, 247, 0.25);
-    margin-left: 6px;
-    white-space: nowrap;
-    flex-shrink: 0;
-    cursor: default;
-    clip-path: polygon(
-      3px 0%,
-      calc(100% - 3px) 0%,
-      100% 3px,
-      100% calc(100% - 3px),
-      calc(100% - 3px) 100%,
-      3px 100%,
-      0% calc(100% - 3px),
-      0% 3px
-    );
-  }
-  .quality-badge::before {
-    content: "";
-    display: inline-block;
-    width: 4px;
-    height: 4px;
-    border-radius: 50%;
-    background: #c084fc;
-    opacity: 0.8;
-    flex-shrink: 0;
-  }
-
-  .quality-badge-lg {
-    font-size: 0.65rem;
-    padding: 2px 8px;
-    margin-left: 0;
-    margin-top: 4px;
   }
 
   /* Status Badge Color Variants */

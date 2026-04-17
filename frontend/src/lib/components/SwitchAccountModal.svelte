@@ -1,7 +1,7 @@
 <script lang="ts">
   import { toasts } from "$lib/stores/toasts";
-  import Modal from "$lib/components/ui/Modal.svelte";
-  import Button from "$lib/components/ui/Button.svelte";
+  import { Modal } from "@media-set/core-ui";
+  import { Button } from "@media-set/core-ui";
 
   interface Props {
     open: boolean;

@@ -6,6 +6,7 @@
     type SonarrSeries,
     type RadarrMovie,
   } from "$lib/stores/arr";
+  import { Badge } from "@media-set/core-ui";
 
   interface Props {
     item: SonarrSeries | RadarrMovie | any;
@@ -103,30 +104,43 @@
       {/if}
 
       <!-- Top-right badges -->
-      {#if isSeries && item.status && item.status.toLowerCase() !== "unknown"}
-        <div
-          class="status-badge"
-          style="background: {getStatusColor(item.status)}"
-          title={statusTooltip()}
-        >
-          {item.status}
-        </div>
-      {:else if !isSeries}
-        <div
-          class="file-badge"
-          class:has-file={item.hasFile === true}
-          title={statusTooltip()}
-        >
-          <span class="material-icons"
-            >{item.hasFile ? "check_circle" : "cloud_download"}</span
+      <div class="absolute top-[6px] right-[6px] z-[2] flex flex-col gap-[4px] items-end">
+        {#if isSeries && item.status && item.status.toLowerCase() !== "unknown"}
+          <Badge
+            color={getStatusColor(item.status)}
+            title={statusTooltip()}
+            size="xs"
+            noDot
+            class="shadow-[0_1px_3px_rgba(0,0,0,0.6)]"
           >
-        </div>
-      {/if}
+            {item.status}
+          </Badge>
+        {:else if !isSeries}
+          <Badge
+            variant={item.hasFile ? "success" : "warning"}
+            title={statusTooltip()}
+            size="xs"
+            noDot
+            class="!px-[4px] shadow-[0_1px_3px_rgba(0,0,0,0.6)]"
+          >
+            <span class="material-icons text-[14px] leading-none"
+              >{item.hasFile ? "check_circle" : "cloud_download"}</span
+            >
+          </Badge>
+        {/if}
+      </div>
 
       <!-- Missing badge -->
       {#if missing > 0}
-        <div class="missing-badge">
-          {isSeries ? `${missing} missing` : "missing"}
+        <div class="absolute top-[6px] left-[6px] z-[2]">
+          <Badge
+            variant="warning"
+            size="xs"
+            noDot
+            class="!bg-[#fbbf24]/95 !text-black shadow-[0_1px_3px_rgba(0,0,0,0.6)]"
+          >
+            {isSeries ? `${missing} missing` : "missing"}
+          </Badge>
         </div>
       {/if}
 
@@ -218,53 +232,7 @@
     height: 100%;
   }
 
-  /* ─── Top badges ─── */
-  .status-badge {
-    position: absolute;
-    top: 6px;
-    right: 6px;
-    font-size: 0.4rem;
-    font-weight: 900;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    padding: 2px 5px;
-    border-radius: 4px;
-    color: #fff;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
-    z-index: 2;
-  }
 
-  .file-badge {
-    position: absolute;
-    top: 6px;
-    right: 6px;
-    z-index: 2;
-  }
-
-  .file-badge .material-icons {
-    font-size: 16px;
-    color: #fbbf24;
-    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
-  }
-
-  .file-badge.has-file .material-icons {
-    color: #34d399;
-  }
-
-  .missing-badge {
-    position: absolute;
-    top: 6px;
-    left: 6px;
-    background: rgba(251, 191, 36, 0.95);
-    color: #000;
-    font-size: 0.45rem;
-    font-weight: 900;
-    text-transform: uppercase;
-    padding: 2px 5px;
-    border-radius: 4px;
-    letter-spacing: 0.05em;
-    z-index: 2;
-  }
 
   /* ─── Bottom gradient scrim (title overlay) ─── */
   .card-scrim {

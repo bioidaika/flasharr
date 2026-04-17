@@ -12,7 +12,7 @@
   import { toasts } from "$lib/stores/toasts";
   import { ui } from "$lib/stores/ui.svelte";
   import { animeFade, animeFly } from "$lib/animations";
-  import Button from "$lib/components/ui/Button.svelte";
+  import { Button, Badge } from "@media-set/core-ui";
   import { fetchAllMovies, type RadarrMovie } from "$lib/stores/arr";
 
   const collectionId = $derived(page.params.id as string);
@@ -198,7 +198,7 @@
       <div class="main-column">
         <!-- Overview -->
         <section class="overview-section glass-panel">
-          <div class="section-badge">BRIEFING</div>
+          <div class="section-badge-wrapper"><Badge variant="success">BRIEFING</Badge></div>
           <h3 class="section-label">Operational Overview</h3>
           {#if loading}
             <div class="skeleton-text"></div>
@@ -251,22 +251,22 @@
                     <!-- Library Status Badge (Top Left) -->
                     <div class="status-tags">
                       {#if libraryTmdbIds.has(movie.id)}
-                        <span class="status-badge owned-badge">
-                          <span class="material-icons">check_circle</span>
+                        <Badge variant="success" size="xs">
+                          <span class="material-icons" style="font-size: 12px;">check_circle</span>
                           OWNED
-                        </span>
+                        </Badge>
                       {:else}
-                        <span class="status-badge missing-badge">
-                          <span class="material-icons">cloud_off</span>
+                        <Badge variant="danger" size="xs">
+                          <span class="material-icons" style="font-size: 12px;">cloud_off</span>
                           MISSING
-                        </span>
+                        </Badge>
                       {/if}
                     </div>
 
                     <!-- Year Badge (Top Right) -->
                     {#if movie.release_date}
-                      <div class="year-badge">
-                        {getYear(movie.release_date)}
+                      <div class="year-badge-wrapper">
+                        <Badge text="{getYear(movie.release_date)?.toString()}" variant="default" size="xs" noDot />
                       </div>
                     {/if}
 
@@ -532,24 +532,10 @@
       0% calc(100% - 20px)
     );
   }
-  .section-badge {
+  .section-badge-wrapper {
     position: absolute;
-    top: 0;
+    top: -12px;
     right: 2rem;
-    background: var(--color-primary, #00f3ff);
-    color: #000;
-    font-family: var(--font-mono, monospace);
-    font-size: 0.55rem;
-    font-weight: 900;
-    padding: 0.2rem 0.6rem;
-    letter-spacing: 0.1em;
-    clip-path: polygon(
-      0% 0%,
-      100% 0%,
-      100% 100%,
-      8px 100%,
-      0% calc(100% - 8px)
-    );
   }
   .section-label {
     font-family: var(--font-mono, monospace);
@@ -683,48 +669,12 @@
     gap: 0.4rem;
     z-index: 5;
   }
-  .status-badge {
-    display: flex;
-    align-items: center;
-    gap: 3px;
-    font-family: var(--font-mono, monospace);
-    font-size: 0.5rem;
-    font-weight: 900;
-    letter-spacing: 0.08em;
-    padding: 3px 8px;
-    border-radius: 4px;
-    backdrop-filter: blur(8px);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-  }
-  .status-badge .material-icons {
-    font-size: 0.7rem;
-  }
-
-  .owned-badge {
-    background: rgba(0, 255, 128, 0.15);
-    border: 1px solid rgba(0, 255, 128, 0.4);
-    color: #00ff80;
-  }
-  .missing-badge {
-    background: rgba(255, 100, 100, 0.15);
-    border: 1px solid rgba(255, 100, 100, 0.3);
-    color: #ff8080;
-  }
 
   /* Year Badge (Top Right) */
-  .year-badge {
+  .year-badge-wrapper {
     position: absolute;
     top: 0.75rem;
     right: 0.75rem;
-    background: rgba(0, 0, 0, 0.6);
-    color: var(--color-primary, #00f3ff);
-    font-family: var(--font-mono, monospace);
-    font-size: 0.7rem;
-    font-weight: 800;
-    padding: 0.25rem 0.5rem;
-    border-radius: 4px;
-    backdrop-filter: blur(8px);
-    border: 1px solid rgba(255, 255, 255, 0.1);
     z-index: 5;
   }
 

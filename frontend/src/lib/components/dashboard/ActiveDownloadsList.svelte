@@ -19,6 +19,8 @@
   }
 
   let { downloads, stats }: Props = $props();
+  
+  import { Badge } from "@media-set/core-ui";
 </script>
 
 <section class="box-section downloads-section">
@@ -52,10 +54,13 @@
           <div class="shard-top">
             <span class="shard-filename" title={dl.filename}>{dl.filename}</span
             >
-            <div class="shard-badge {dl.state}">
-              <span class="dot"></span>
+            <Badge
+              variant={dl.state === "downloading" ? "primary" : dl.state === "queued" ? "warning" : dl.state === "completed" ? "success" : "default"}
+              size="xs"
+              class="uppercase"
+            >
               {dl.state}
-            </div>
+            </Badge>
           </div>
 
           <div class="shard-progress-block">
@@ -237,50 +242,7 @@
     max-width: 70%;
   }
 
-  .shard-badge {
-    font-size: 0.55rem;
-    font-weight: 900;
-    text-transform: uppercase;
-    background: rgba(255, 255, 255, 0.05);
-    padding: 2px 8px;
-    border-radius: 20px;
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
-  }
 
-  .shard-badge .dot {
-    width: 4px;
-    height: 4px;
-    border-radius: 50%;
-    background: #fff;
-  }
-
-  .shard-badge.downloading {
-    color: var(--color-primary);
-    border-color: rgba(0, 243, 255, 0.3);
-  }
-  .shard-badge.downloading .dot {
-    background: var(--color-primary);
-    box-shadow: 0 0 5px var(--color-primary);
-  }
-
-  .shard-badge.queued {
-    color: #ffcc00;
-    border-color: rgba(255, 204, 0, 0.3);
-  }
-  .shard-badge.queued .dot {
-    background: #ffcc00;
-  }
-
-  .shard-badge.completed {
-    color: var(--color-secondary);
-    border-color: rgba(0, 255, 136, 0.3);
-  }
-  .shard-badge.completed .dot {
-    background: var(--color-secondary);
-  }
 
   .shard-progress-block {
     display: flex;

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { animeFade } from "$lib/animations";
+  import { Badge } from "@media-set/core-ui";
 
   // Health status types
   type HealthStatus = "healthy" | "degraded" | "unhealthy";
@@ -389,17 +390,9 @@
             <span class="service-name">WebSocket</span>
           </div>
           <div class="card-body">
-            <span
-              class="status-badge"
-              style="background: {healthData.websocket.status === 'healthy'
-                ? 'rgba(0, 255, 128, 0.1)'
-                : 'rgba(255, 215, 0, 0.1)'}; color: {healthData.websocket
-                .status === 'healthy'
-                ? '#00ff80'
-                : '#ffd700'};"
-            >
+            <Badge variant={healthData.websocket.status === 'healthy' ? 'success' : 'warning'}>
               {healthData.websocket.status}
-            </span>
+            </Badge>
             {#if healthData.websocket.message}
               <p class="status-message">{healthData.websocket.message}</p>
             {/if}
@@ -414,21 +407,9 @@
               <span class="service-name">Sonarr</span>
             </div>
             <div class="card-body">
-              <span
-                class="status-badge"
-                style="background: {healthData.sonarr.status === 'healthy'
-                  ? 'rgba(0, 255, 128, 0.1)'
-                  : healthData.sonarr.status === 'degraded'
-                    ? 'rgba(255, 215, 0, 0.1)'
-                    : 'rgba(255, 82, 82, 0.1)'}; color: {healthData.sonarr
-                  .status === 'healthy'
-                  ? '#00ff80'
-                  : healthData.sonarr.status === 'degraded'
-                    ? '#ffd700'
-                    : '#ff5252'};"
-              >
+              <Badge variant={healthData.sonarr.status === 'healthy' ? 'success' : healthData.sonarr.status === 'degraded' ? 'warning' : 'danger'}>
                 {healthData.sonarr.status}
-              </span>
+              </Badge>
               {#if healthData.sonarr.message}
                 <p class="status-message">{healthData.sonarr.message}</p>
               {/if}
@@ -444,21 +425,9 @@
               <span class="service-name">Radarr</span>
             </div>
             <div class="card-body">
-              <span
-                class="status-badge"
-                style="background: {healthData.radarr.status === 'healthy'
-                  ? 'rgba(0, 255, 128, 0.1)'
-                  : healthData.radarr.status === 'degraded'
-                    ? 'rgba(255, 215, 0, 0.1)'
-                    : 'rgba(255, 82, 82, 0.1)'}; color: {healthData.radarr
-                  .status === 'healthy'
-                  ? '#00ff80'
-                  : healthData.radarr.status === 'degraded'
-                    ? '#ffd700'
-                    : '#ff5252'};"
-              >
+              <Badge variant={healthData.radarr.status === 'healthy' ? 'success' : healthData.radarr.status === 'degraded' ? 'warning' : 'danger'}>
                 {healthData.radarr.status}
-              </span>
+              </Badge>
               {#if healthData.radarr.message}
                 <p class="status-message">{healthData.radarr.message}</p>
               {/if}
@@ -473,17 +442,9 @@
             <span class="service-name">Fshare</span>
           </div>
           <div class="card-body">
-            <span
-              class="status-badge"
-              style="background: {healthData.fshare.status === 'healthy'
-                ? 'rgba(0, 255, 128, 0.1)'
-                : 'rgba(255, 215, 0, 0.1)'}; color: {healthData.fshare
-                .status === 'healthy'
-                ? '#00ff80'
-                : '#ffd700'};"
-            >
+            <Badge variant={healthData.fshare.status === 'healthy' ? 'success' : 'warning'}>
               {healthData.fshare.status}
-            </span>
+            </Badge>
             {#if healthData.fshare.message}
               <p class="status-message">{healthData.fshare.message}</p>
             {/if}
@@ -497,12 +458,9 @@
             <span class="service-name">Database</span>
           </div>
           <div class="card-body">
-            <span
-              class="status-badge"
-              style="background: rgba(0, 255, 128, 0.1); color: #00ff80;"
-            >
+            <Badge variant="success">
               {healthData.database.status}
-            </span>
+            </Badge>
             {#if healthData.database.message}
               <p class="status-message">{healthData.database.message}</p>
             {/if}
@@ -736,25 +694,6 @@
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
-  }
-
-  .status-badge {
-    display: inline-block;
-    padding: 0.25rem 0.75rem;
-    font-size: 0.7rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    font-family: var(--font-mono);
-    width: fit-content;
-    clip-path: polygon(
-      4px 0%,
-      100% 0%,
-      100% calc(100% - 4px),
-      calc(100% - 4px) 100%,
-      0% 100%,
-      0% 4px
-    );
   }
 
   .status-message {

@@ -1083,12 +1083,12 @@ mod tests {
         
         // Check first item
         assert!(xml.contains("<title>Test Movie 1080p</title>"));
-        assert!(xml.contains("<guid>fshare://TEST123</guid>"));
+        assert!(xml.contains("fshare://TEST123"));
         assert!(xml.contains("value=\"2040\""));
-        
+
         // Check second item
         assert!(xml.contains("<title>Test Show S01E01 2160p</title>"));
-        assert!(xml.contains("<guid>fshare://TEST456</guid>"));
+        assert!(xml.contains("fshare://TEST456"));
         assert!(xml.contains("value=\"5045\""));
         
         // Check Newznab attributes

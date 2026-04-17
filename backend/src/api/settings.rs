@@ -160,22 +160,45 @@ async fn get_downloads_settings(
 async fn update_downloads_settings(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<DownloadsSettings>,
-) -> Json<ActionResponse> {
+) -> Result<Json<ActionResponse>, (StatusCode, Json<ActionResponse>)> {
+    let new_dir = std::path::PathBuf::from(&payload.directory);
+
+    // Ensure the directory exists (create if absent)
+    if let Err(e) = std::fs::create_dir_all(&new_dir) {
+        return Err((StatusCode::BAD_REQUEST, Json(ActionResponse {
+            success: false,
+            message: Some(format!("Cannot create directory '{}': {}", new_dir.display(), e)),
+        })));
+    }
+
+    // Write-test: verify the process can actually write into it
+    let test_path = new_dir.join(format!(".flasharr_write_test_{}", std::process::id()));
+    match std::fs::File::create(&test_path) {
+        Ok(_) => { let _ = std::fs::remove_file(&test_path); }
+        Err(e) => {
+            return Err((StatusCode::BAD_REQUEST, Json(ActionResponse {
+                success: false,
+                message: Some(format!(
+                    "Directory '{}' is not writable: {}. Check volume mounts and ownership.",
+                    new_dir.display(), e
+                )),
+            })));
+        }
+    }
+
     // Get current config to preserve other fields
     let mut config = state.download_orchestrator.get_config().await;
-    
-    // Update fields
+
     config.max_concurrent = payload.max_concurrent;
     config.segments_per_download = payload.segments_per_download as usize;
-    config.download_dir = std::path::PathBuf::from(payload.directory);
-    
-    // Push update to orchestrator
+    config.download_dir = new_dir;
+
     state.download_orchestrator.update_config(config).await;
-    
-    Json(ActionResponse {
+
+    Ok(Json(ActionResponse {
         success: true,
         message: Some("Settings updated successfully (runtime only, persistence not implemented)".to_string()),
-    })
+    }))
 }
 
 /// GET /api/settings/sonarr - Get Sonarr settings

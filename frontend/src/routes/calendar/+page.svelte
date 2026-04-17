@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { fetchCalendar, type CalendarEntry } from "$lib/stores/arr";
   import { integrations } from "$lib/stores/settings";
+  import { Badge } from "@media-set/core-ui";
 
   let viewMode: "week" | "month" = $state("week");
   let entries = $state<CalendarEntry[]>([]);
@@ -195,7 +196,7 @@
             <div class="day-label">
               <span class="day-name">{formatDayOfWeek(dateStr)}</span>
               {#if isToday(dateStr)}
-                <span class="today-badge">TODAY</span>
+                <Badge variant="success" size="xs" noDot>TODAY</Badge>
               {/if}
             </div>
             {#if dayEntries.length > 0}
@@ -468,15 +469,7 @@
     opacity: 0.6;
   }
 
-  .today-badge {
-    font-size: 0.45rem;
-    font-weight: 900;
-    letter-spacing: 0.12em;
-    background: rgba(52, 211, 153, 0.2);
-    color: #34d399;
-    padding: 1px 5px;
-    border-radius: 2px;
-  }
+
 
   .day-count {
     font-family: var(--font-mono, monospace);

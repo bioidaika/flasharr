@@ -6,7 +6,7 @@
   import { ui } from "$lib/stores/ui.svelte";
   import { SearchResultCard } from "$lib/components";
   import { queryClient } from "$lib/stores/query";
-  import Button from "$lib/components/ui/Button.svelte";
+  import { Button, Badge } from "@media-set/core-ui";
 
   const API_BASE = "/api";
 
@@ -391,24 +391,20 @@
 
                 <div class="item-meta">
                   {#if item.resolution}
-                    <span
-                      class="badge res"
-                      style="color: {getQualityColor(item.resolution)}"
-                      >{item.resolution}</span
-                    >
+                    <Badge variant="quality" size="sm">{item.resolution}</Badge>
                   {/if}
                   {#if item.source}
-                    <span class="badge src">{item.source}</span>
+                    <Badge variant="source" size="sm" class="text-white">{item.source}</Badge>
                   {/if}
                   {#if item.episodeTag}
-                    <span class="badge episode">{item.episodeTag}</span>
+                    <Badge variant="episode" size="sm">{item.episodeTag}</Badge>
                   {/if}
                   <span class="size">{formatSize(item.fileSize)}</span>
                   {#if item.hasVietsub}
-                    <span class="badge sub">VIETSUB</span>
+                    <Badge variant="language" size="sm" color="#ff6b6b">VIETSUB</Badge>
                   {/if}
                   {#if item.hasVietdub}
-                    <span class="badge dub">VIETDUB</span>
+                    <Badge variant="language" size="sm" color="#ffa500">VIETDUB</Badge>
                   {/if}
                 </div>
               </div>
@@ -664,35 +660,6 @@
     flex-wrap: wrap;
   }
 
-  /* Badges */
-  .badge {
-    font-size: 0.65rem;
-    font-weight: 800;
-    padding: 0.15rem 0.4rem;
-    border-radius: 4px;
-    letter-spacing: 0.05em;
-  }
-  .badge.res {
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid currentColor;
-  }
-  .badge.src {
-    background: rgba(255, 255, 255, 0.1);
-    color: #fff;
-  }
-  .badge.episode {
-    background: rgba(138, 43, 226, 0.2);
-    color: #c084fc;
-    border: 1px solid rgba(138, 43, 226, 0.4);
-  }
-  .badge.sub {
-    background: rgba(255, 107, 107, 0.2);
-    color: #ff6b6b;
-  }
-  .badge.dub {
-    background: rgba(255, 165, 0, 0.2);
-    color: #ffa500;
-  }
   .size {
     font-family: var(--font-mono);
     font-size: 0.7rem;

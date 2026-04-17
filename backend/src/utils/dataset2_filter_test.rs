@@ -16,6 +16,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires local dataset file at debug_log/dataset_2.json"]
     fn count_dataset2_parsing_success() {
         let file_path = "/Users/blavkbeav/Documents/Workspace/Flasharr/Flasharr/debug_log/dataset_2.json";
         let file = File::open(file_path).expect("Failed to open dataset file");

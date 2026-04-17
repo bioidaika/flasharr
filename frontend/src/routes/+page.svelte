@@ -1,8 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from "svelte";
   import {
-    anime,
-    stagger,
     countUp,
     animateRing,
     revealOnScroll,
@@ -29,7 +27,7 @@
   } from "$lib/stores/arr";
   import { integrations } from "$lib/stores/settings";
   import { accountStore } from "$lib/stores/account.svelte";
-  import Badge from "$lib/components/ui/Badge.svelte";
+  import { Badge } from "@media-set/core-ui";
 
   // Trending carousel state
   let trendingItems = $state<any[]>([]);
@@ -292,9 +290,9 @@
                           <span>{item.vote_average.toFixed(1)}</span>
                         </div>
                       {/if}
-                      <div class="stat-type">
+                      <Badge variant="default" size="xs" noDot class="border-[rgba(255,255,255,0.1)] text-[rgba(255,255,255,0.7)] font-semibold tracking-wide">
                         {item.media_type?.toUpperCase() || "MOVIE"}
-                      </div>
+                      </Badge>
                     </div>
                   </div>
                   <!-- Expandable overview (on hover) -->
@@ -415,12 +413,12 @@
         class="status-card-v5 card-system"
         use:revealOnScroll={{ y: 20, delay: 160 }}
       >
+        <div class="sc-head">
+          <span class="material-icons sc-icon">dns</span>
+          <span class="sc-label">SYSTEM HEALTH</span>
+        </div>
         <div class="sc-banner green-banner">
           <div class="banner-dots"></div>
-          <div class="sc-head">
-            <span class="material-icons sc-icon">dns</span>
-            <span class="sc-label">SYSTEM HEALTH</span>
-          </div>
           <div class="health-nodes">
             <div
               class="health-node"
@@ -765,15 +763,7 @@
     font-size: 14px;
   }
 
-  .stat-type {
-    background: rgba(255, 255, 255, 0.1);
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-size: 0.65rem;
-    font-weight: 600;
-    letter-spacing: 0.05em;
-    color: rgba(255, 255, 255, 0.7);
-  }
+
 
   /* Expandable overview (hidden by default, expands on hover) */
   .overlay-expand {
