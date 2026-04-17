@@ -16,7 +16,7 @@
   import { toasts } from "$lib/stores/toasts";
   import { ui } from "$lib/stores/ui.svelte";
   import { MediaCard } from "$lib/components";
-  import Button from "$lib/components/ui/Button.svelte";
+  import { Button, Badge } from "@media-set/core-ui";
   import {
     fetchAllSeries,
     fetchEpisodesBySonarrId,
@@ -367,7 +367,9 @@
                         "/images/placeholder-poster.svg"}
                       alt={ep.name}
                     />
-                    <div class="episode-badge">EP {ep.episode_number}</div>
+                    <div class="absolute top-2 left-2 z-[2] pointer-events-none">
+                      <Badge variant="episode" size="xs" noDot>EP {ep.episode_number}</Badge>
+                    </div>
                     {#if !isEpisodeAired(ep)}
                       <div class="coming-soon-overlay">
                         <span class="material-icons">schedule</span>
@@ -396,13 +398,17 @@
                       </div>
                       <div class="episode-actions">
                         {#if getEpisodeAcquisition(ep.season_number, ep.episode_number) === true}
-                          <span class="ep-acquired-badge" title="In library">
-                            <span class="material-icons">check_circle</span>
-                          </span>
+                          <div title="In library">
+                            <Badge variant="status" size="xs" noDot class="text-[#34d399] border-[#34d399]/30 bg-[#34d399]/10">
+                              <span class="material-icons text-[12px]">check_circle</span>
+                            </Badge>
+                          </div>
                         {:else if getEpisodeAcquisition(ep.season_number, ep.episode_number) === false}
-                          <span class="ep-missing-badge" title="Missing">
-                            <span class="material-icons">cancel</span>
-                          </span>
+                          <div title="Missing">
+                            <Badge variant="status" size="xs" noDot class="text-[#ef4444] border-[#ef4444]/30 bg-[#ef4444]/10 opacity-70">
+                              <span class="material-icons text-[12px]">cancel</span>
+                            </Badge>
+                          </div>
                         {/if}
                         {#if isEpisodeAired(ep)}
                           <button
@@ -506,10 +512,10 @@
       <aside class="detail-sidebar">
         <div class="action-panel glass-panel">
           {#if inLibrary}
-            <div class="library-badge">
-              <span class="material-icons">video_library</span>
+            <Badge variant="status" size="sm" noDot class="w-full justify-center mb-2 font-mono text-[#34d399] border-[#34d399]/30 bg-[#34d399]/10">
+              <span class="material-icons text-[13px]">video_library</span>
               IN LIBRARY
-            </div>
+            </Badge>
           {/if}
           <Button
             icon="manage_search"
@@ -954,18 +960,6 @@
     opacity: 0.7;
   }
 
-  .episode-badge {
-    position: absolute;
-    bottom: 0.5rem;
-    left: 0.5rem;
-    background: rgba(0, 0, 0, 0.8);
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-size: 0.7rem;
-    font-weight: 800;
-    font-family: var(--font-mono);
-  }
-
   .episode-info {
     flex: 1;
     min-width: 0;
@@ -1342,25 +1336,7 @@
     color: var(--text-muted);
   }
 
-  .library-badge {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.6rem 1rem;
-    background: rgba(52, 211, 153, 0.1);
-    border: 1px solid rgba(52, 211, 153, 0.3);
-    border-radius: 8px;
-    color: #34d399;
-    font-size: 0.75rem;
-    font-weight: 800;
-    letter-spacing: 0.1em;
-    font-family: var(--font-mono);
-    margin-bottom: 0.5rem;
-  }
 
-  .library-badge .material-icons {
-    font-size: 1rem;
-  }
 
   .add-library-btn {
     display: flex;
@@ -1389,24 +1365,5 @@
     flex-shrink: 0;
   }
 
-  .ep-acquired-badge {
-    color: #34d399;
-    display: flex;
-    align-items: center;
-  }
 
-  .ep-acquired-badge .material-icons {
-    font-size: 1.1rem;
-  }
-
-  .ep-missing-badge {
-    color: #ef4444;
-    display: flex;
-    align-items: center;
-    opacity: 0.6;
-  }
-
-  .ep-missing-badge .material-icons {
-    font-size: 1.1rem;
-  }
 </style>

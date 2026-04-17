@@ -3,9 +3,9 @@
   import { smartGrabStore } from "$lib/stores/smartGrab";
   import { toasts } from "$lib/stores/toasts";
   import { animeSlideDown } from "$lib/animations";
-  import Badge, { type BadgeVariant } from "$lib/components/ui/Badge.svelte";
-  import Modal from "$lib/components/ui/Modal.svelte";
-  import Button from "$lib/components/ui/Button.svelte";
+  import { Badge, type BadgeVariant } from "@media-set/core-ui";
+  import { Modal } from "@media-set/core-ui";
+  import { Button } from "@media-set/core-ui";
 
   /** Extract display tags from a file object (same flags the search API returns) */
   function getFileTags(

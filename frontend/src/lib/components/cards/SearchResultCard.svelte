@@ -1,7 +1,7 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
-  import Badge from "../ui/Badge.svelte";
-  import Button from "../ui/Button.svelte";
+  import { Badge } from "@media-set/core-ui";
+  import { Button } from "@media-set/core-ui";
   import { toasts } from "$lib/stores/toasts";
 
   interface Props {
@@ -124,9 +124,7 @@
 
     <!-- Episode Tag (Top Right - Prominent) -->
     {#if episodeTag}
-      <div class="episode-badge">
-        {episodeTag}
-      </div>
+      <Badge text={episodeTag} variant="episode" size="sm" class="absolute top-3 right-3 z-10 shadow-[0_5px_15px_rgba(0,0,0,0.3)]" />
     {/if}
 
     <!-- Quality Tags (Top Left) -->
@@ -248,23 +246,6 @@
 
   .search-result-card-v3:hover .card-shine {
     transform: translateX(100%);
-  }
-
-  /* Episode Badge */
-  .episode-badge {
-    position: absolute;
-    top: 1rem;
-    right: 1rem;
-    background: rgba(138, 43, 226, 0.85);
-    color: #fff;
-    font-size: 0.8rem;
-    font-weight: 800;
-    padding: 0.4rem 0.6rem;
-    border-radius: 6px;
-    backdrop-filter: blur(8px);
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    z-index: 5;
-    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
   }
 
   /* Quality Tags */

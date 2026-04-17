@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import ContentShelf from "./ContentShelf.svelte";
+  import { MediaShelf, MediaCard } from "@media-set/core-ui";
   import {
     getTrendingMovies,
     getPopularTVShows,
@@ -50,4 +50,21 @@
   });
 </script>
 
-<ContentShelf title="Popular Now" {items} {loading} />
+{#if !loading && items.length > 0}
+  <MediaShelf
+    title="Popular Now"
+    {items}
+    keyExtractor={(item) => String(item.tmdbId)}
+  >
+    {#snippet card(item, index, isHovered)}
+      <MediaCard
+        title={item.title}
+        imgUrl={item.poster || ''}
+        year={item.year?.toString() || ''}
+        tag={item.type.toUpperCase()}
+        href="/{item.type === 'tv' ? 'tv' : 'movie'}/{item.tmdbId}"
+        {isHovered}
+      />
+    {/snippet}
+  </MediaShelf>
+{/if}

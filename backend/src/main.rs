@@ -130,7 +130,7 @@ async fn main() {
     let host_registry = Arc::new(hosts::create_registry(&config, shared_http_client, Arc::clone(&db)));
     
     // Create download config from app config
-    let download_config = downloader::config::DownloadConfig {
+    let mut download_config = downloader::config::DownloadConfig {
         max_concurrent: config.downloads.max_concurrent,
         segments_per_download: config.downloads.segments_per_download as usize,
         download_dir: config.downloads.directory.clone(),
@@ -140,6 +140,47 @@ async fn main() {
         retry_max_wait: 300,
         retry: downloader::config::RetryConfig::default(),
     };
+
+    // V2: Robust Directory Validation for Staging Environments
+    // If the configured download directory is not writable (common with /downloads volume issues),
+    // we fallback to appData/downloads which is guaranteed to be writable and managed by our entrypoint.
+    let app_data_dir = std::env::var("FLASHARR_APPDATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join("appData"));
+    
+    let current_dir = &download_config.download_dir;
+    let fallback_dir = app_data_dir.join("downloads");
+    
+    let is_not_writable = if !current_dir.exists() {
+        std::fs::create_dir_all(current_dir).is_err()
+    } else {
+        // Try creating a temporary test file
+        let test_file = current_dir.join(format!(".write_test_{}", uuid::Uuid::new_v4().simple()));
+        match std::fs::File::create(&test_file) {
+            Ok(_) => {
+                let _ = std::fs::remove_file(test_file);
+                false
+            },
+            Err(_) => true,
+        }
+    };
+
+    if is_not_writable {
+        tracing::warn!(
+            "Download directory {} is not writable! Falling back to managed appData path: {}",
+            current_dir.display(),
+            fallback_dir.display()
+        );
+        
+        // Ensure fallback directory exists
+        if let Err(e) = std::fs::create_dir_all(&fallback_dir) {
+            tracing::error!("CRITICAL: Failed to create fallback download directory {}: {}", fallback_dir.display(), e);
+        } else {
+            download_config.download_dir = fallback_dir;
+        }
+    } else {
+        tracing::info!("Using download directory: {}", current_dir.display());
+    }
     
     // Load Arr configuration from database (setup wizard saves here)
     // This ensures webhook handler initializes correctly even if settings were saved before

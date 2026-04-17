@@ -5,7 +5,8 @@
   import { beforeNavigate, afterNavigate, goto } from "$app/navigation";
   import { onMount, onDestroy } from "svelte";
   import {
-    anime,
+    animate,
+    animeStagger,
     stagger as staggerAction,
     animatePageEntrance,
   } from "$lib/animations";
@@ -141,12 +142,11 @@
     if (viewContainerEl) {
       const wrapper = viewContainerEl.querySelector(".transition-wrapper");
       if (wrapper) {
-        anime({
-          targets: wrapper,
+        animate(wrapper, {
           opacity: [0, 1],
           translateY: [12, 0],
           duration: 350,
-          easing: "easeOutQuad",
+          ease: "outQuad",
         });
       }
     }
@@ -163,13 +163,12 @@
         navLinks.forEach((el) => {
           (el as HTMLElement).style.opacity = "0";
         });
-        anime({
-          targets: navLinks,
+        animate(Array.from(navLinks) as HTMLElement[], {
           opacity: [0, 1],
           translateX: [-20, 0],
           duration: 400,
-          delay: anime.stagger(50, { start: 300 }),
-          easing: "easeOutCubic",
+          delay: animeStagger(50, { start: 300 }),
+          ease: "outCubic",
         });
       }
     });
@@ -463,6 +462,86 @@
 <Toasts />
 
 <style>
+  /* ═══════════════════════════════════════════════════════════
+     HEADER & MOBILE NAV FIXES
+     ═══════════════════════════════════════════════════════════ */
+  .header-left, .header-right {
+    display: flex;
+    align-items: center;
+  }
+
+  .bottom-nav {
+    display: none;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: calc(60px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    background: rgba(6, 8, 14, 0.92);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    z-index: 100;
+  }
+
+  .bottom-nav-item {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    color: rgba(255, 255, 255, 0.4);
+    text-decoration: none;
+    position: relative;
+    padding: 0 10px;
+    transition: color 0.2s;
+  }
+
+  .bottom-nav-item .nav-icon {
+    font-size: 24px;
+    margin-bottom: 2px;
+  }
+
+  .bottom-nav-item .nav-label {
+    font-size: 10px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .bottom-nav-item.active {
+    color: var(--color-primary, #00f3ff);
+  }
+
+  .bottom-nav-item.active::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 25%;
+    right: 25%;
+    height: 2px;
+    background: var(--color-primary, #00f3ff);
+    box-shadow: 0 0 8px var(--color-primary, #00f3ff);
+    border-radius: 0 0 2px 2px;
+  }
+
+  @media (max-width: 1024px) {
+    .bottom-nav {
+      display: flex;
+    }
+    .header-right .stat-pill {
+      display: none;
+    }
+    /* Hide desktop sidebar on mobile */
+    .glass-sidebar {
+      display: none !important;
+    }
+  }
+
+  /* ═══════════════════════════════════════════════════════════ */
+
   .transition-wrapper {
     width: 100%;
     height: 100%;

@@ -1,15 +1,89 @@
-/* Flasharr v3 - Use Vanilla Styles */
+@import "tailwindcss";
+@source "../../core-ui";
 
-/* Import the complete v2 styles */
-@import './v2-styles.css';
-@import './mobile-v2.css';
+/* ═══════════════════════════════════════════════════════════
+   Shared Design Tokens from @media-set/core-ui
+   These provide the canonical Cyber-Dark Elite token values.
+   ═══════════════════════════════════════════════════════════ */
+@import "@media-set/core-ui/styles/fonts.css";
+@import "@media-set/core-ui/styles/tokens.css";
+@import "@media-set/core-ui/styles/glass.css";
+@import "@media-set/core-ui/styles/scrollbar.css";
+@import "@media-set/core-ui/styles/media-card.css";
+@import "@media-set/core-ui/styles/aurora.css";
 
-/* Override any Tailwind reset conflicts */
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Flasharr — Force dark background AFTER Tailwind preflight
+   Tailwind 4's @import resets html/body to white bg.
+   These must come AFTER the @import to override the reset.
+   ═══════════════════════════════════════════════════════════ */
 html, body {
   height: 100vh;
   width: 100vw;
   margin: 0;
   padding: 0;
+  background-color: #030508 !important;
+  color: var(--text-primary, #e2e8f0);
 }
 
+/* ═══════════════════════════════════════════════════════════
+   Critical Layout Overrides — Prevent Tailwind v4 Preflight Reset
+   Tailwind v4 processes @source and may reset flex-direction.
+   These rules MUST come after all @import statements.
+   ═══════════════════════════════════════════════════════════ */
 
+/* App shell — MUST be row to place sidebar beside main content */
+.app-shell {
+  display: flex !important;
+  flex-direction: row !important;
+  height: 100vh !important;
+  width: 100vw !important;
+  overflow: hidden !important;
+}
+
+/* Main viewport — fills the remaining width, stacks header + content vertically */
+.main-viewport {
+  display: flex !important;
+  flex-direction: column !important;
+  flex: 1 !important;
+  min-width: 0 !important;
+  height: 100vh !important;
+  overflow: hidden !important;
+}
+
+/* Glass sidebar — fixed width, full height, never shrinks */
+.glass-sidebar {
+  flex-shrink: 0 !important;
+  height: 100vh !important;
+}
+
+/* Glass header — fixed height, never grows */
+.glass-header {
+  flex-shrink: 0 !important;
+  height: var(--header-height, 72px) !important;
+  min-height: var(--header-height, 72px) !important;
+  max-height: var(--header-height, 72px) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+}
+
+/* View Container — scrollable content area, fills remaining height */
+.view-container {
+  flex: 1 !important;
+  min-height: 0 !important;
+  overflow-y: auto;
+  overflow-x: hidden;
+  position: relative;
+  z-index: 1;
+}
