@@ -202,6 +202,8 @@ pub struct DownloadTask {
     /// Arr integration IDs (populated by webhook when series/movie is added)
     pub arr_series_id: Option<i64>,    // Sonarr series ID
     pub arr_movie_id: Option<i64>,     // Radarr movie ID
+    pub arr_announced: bool,           // Whether Arr has been notified of completion
+    pub arr_announce_error: Option<String>, // Error message if Arr announcement failed
     
     /// State machine object (not serialized)
     #[serde(skip, default = "default_state_obj")]
@@ -279,6 +281,8 @@ impl DownloadTask {
             resolution: None,
             arr_series_id: None,
             arr_movie_id: None,
+            arr_announced: false,
+            arr_announce_error: None,
             state_obj: TaskStateFactory::get_state(state),
             cancel_token: CancellationToken::new(),
             pause_notify: Arc::new(Notify::new()),

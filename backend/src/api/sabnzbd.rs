@@ -442,21 +442,26 @@ async fn handle_history(state: Arc<AppState>) -> Result<Json<serde_json::Value>,
             }
 
             // Map container path to Sonarr path.
-            // Flasharr container:  /downloads/Show/ep.mkv
-            // Sonarr (LXC 110):   /data/downloads/Show/ep.mkv  (has /data → /data)
-            let sonarr_path = if t.destination.starts_with("/downloads/") {
-                // Container-internal path → prefix with /data
-                format!("/data{}", t.destination)
-            } else if t.destination.starts_with("/data/downloads/") {
+            // Flasharr container:  /appData/downloads/Show/ep.mkv
+            // Host (LXC 110/112):  /data/flasharr-download/Show/ep.mkv
+            // Sonarr (LXC 110):   /data/flasharr-download/Show/ep.mkv  (has /data → /data)
+            let sonarr_path = if t.destination.starts_with("/appData/downloads/") {
+                // Container-internal path → prefix with host-side /data/flasharr-download
+                t.destination.replace("/appData/downloads/", "/data/flasharr-download/")
+            } else if t.destination.starts_with("/data/flasharr-download/") {
                 // Already the correct Sonarr-visible path (tasks added post-fix)
                 t.destination.clone()
             } else {
-                // Unknown path — log and skip so Sonarr doesn't get a garbage path
-                tracing::warn!(
-                    "SABnzbd history: unexpected destination path for {}: {}",
-                    t.filename, t.destination
-                );
-                return None;
+                // Compatibility for older tasks or nested mounts
+                if t.destination.starts_with("/downloads/") {
+                    t.destination.replace("/downloads/", "/data/flasharr-download/")
+                } else {
+                    tracing::warn!(
+                        "SABnzbd history: unexpected destination path for {}: {}",
+                        t.filename, t.destination
+                    );
+                    return None;
+                }
             };
 
             // Only return completed items where the file actually exists on disk

@@ -372,10 +372,16 @@ impl DownloadOrchestrator {
             task.quality, task.resolution
         );
         
-        // Store TMDB metadata for Sonarr/Radarr matching
         if let Some(ref meta) = tmdb_metadata {
             task.tmdb_id = meta.tmdb_id;
-            task.tmdb_title = meta.title.clone();
+            
+            // Set tmdb_title to "Episode X" for TV episodes, otherwise use series/movie title
+            if let (Some(_), Some(ep)) = (meta.season, meta.episode) {
+                task.tmdb_title = Some(format!("Episode {}", ep));
+            } else {
+                task.tmdb_title = meta.title.clone();
+            }
+            
             task.tmdb_season = meta.season.map(|s| s as u32);
             task.tmdb_episode = meta.episode.map(|e| e as u32);
             
@@ -700,6 +706,74 @@ impl DownloadOrchestrator {
     /// Get task manager reference
     pub fn task_manager(&self) -> &Arc<DownloadTaskManager> {
         &self.task_manager
+    }
+
+    /// Re-process all COMPLETED downloads that haven't been linked to Sonarr/Radarr.
+    /// For each completed task: looks up the arr path, creates a symlink, triggers rescan.
+    /// Returns a list of (task_id, filename, status_message) tuples.
+    pub async fn backfill_arr_paths(&self) -> Vec<(String, String, String)> {
+        let mut results = Vec::new();
+
+        // Get all completed tasks from DB
+        let completed_tasks = if let Some(db) = &self.db {
+            match db.get_tasks_by_states_async(vec!["COMPLETED".to_string()]).await {
+                Ok(tasks) => tasks,
+                Err(e) => {
+                    tracing::error!("Backfill: Failed to load completed tasks: {}", e);
+                    return vec![("".into(), "".into(), format!("DB error: {}", e))];
+                }
+            }
+        } else {
+            // Fallback to in-memory tasks
+            self.task_manager.get_tasks().into_iter()
+                .filter(|t| t.state == DownloadState::Completed)
+                .collect()
+        };
+
+        tracing::info!("Backfill: Processing {} completed tasks", completed_tasks.len());
+
+        for task in &completed_tasks {
+            let task_id = task.id.to_string();
+            let filename = task.filename.clone();
+
+            // Skip tasks that don't have TMDB metadata (can't look up arr path)
+            if task.tmdb_id.is_none() {
+                results.push((task_id, filename, "skipped: no tmdb_id".into()));
+                continue;
+            }
+
+            // Check if source file exists at current destination
+            let source = std::path::Path::new(&task.destination);
+            let source_exists = tokio::fs::metadata(source).await.is_ok();
+            let source_is_symlink = tokio::fs::symlink_metadata(source).await
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+
+            if !source_exists && !source_is_symlink {
+                // File doesn't exist at recorded destination — check if it's already at arr path
+                results.push((task_id, filename, format!("skipped: file not found at {}", task.destination)));
+                continue;
+            }
+
+            // Try to move/symlink to arr path
+            match Self::move_to_arr_path(task, &self.arr_client).await {
+                Some(updated_task) => {
+                    // Update in task manager and DB
+                    self.task_manager.update_task(updated_task.clone());
+                    if let Some(db) = &self.db {
+                        let _ = db.save_task(&updated_task);
+                    }
+                    results.push((task_id, filename, format!("linked to {}", updated_task.destination)));
+                }
+                None => {
+                    // move_to_arr_path returned None — could be already at target, not in arr, etc.
+                    results.push((task_id, filename, "skipped: arr lookup failed or already at target".into()));
+                }
+            }
+        }
+
+        tracing::info!("Backfill: Completed. {} tasks processed", results.len());
+        results
     }
 
     /// Get aggregate engine statistics (with database counts for filter dropdown)
@@ -1059,7 +1133,82 @@ impl DownloadOrchestrator {
         tracing::info!("Resumed {} tasks atomically", affected);
         affected
     }
+
+    /// Re-download a task using its original data
+    pub async fn redownload_task(&self, task_id: uuid::Uuid) -> Result<DownloadTask, anyhow::Error> {
+        let mut task = self.get_task_unified(task_id).await
+            .ok_or_else(|| anyhow::anyhow!("Task not found"))?;
+
+        tracing::info!("Re-download requested for task {} ({})", task.filename, task.id);
+
+        // 1. Delete existing files to force a fresh start
+        let dest_path = std::path::PathBuf::from(&task.destination);
+        if dest_path.exists() {
+            if let Err(e) = tokio::fs::remove_file(&dest_path).await {
+                tracing::warn!("Failed to delete existing file during re-download: {}", e);
+            } else {
+                tracing::info!("Deleted existing file: {:?}", dest_path);
+            }
+        }
+        
+        // Also delete potential partial file (.flasharr)
+        let temp_path = dest_path.with_extension(
+            format!("{}.flasharr", dest_path.extension().and_then(|e| e.to_str()).unwrap_or(""))
+        );
+        if temp_path.exists() {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+        }
+
+        // 2. Reset task state
+        task.state = DownloadState::Queued;
+        task.progress = 0.0;
+        task.downloaded = 0;
+        task.speed = 0.0;
+        task.eta = 0.0;
+        task.retry_count = 0;
+        task.error_message = None;
+        task.wait_until = None;
+        task.started_at = None;
+        task.completed_at = None;
+        task.url = task.original_url.clone(); // Force re-resolution
+        task.url_metadata = None;
+        task.cancel_token = tokio_util::sync::CancellationToken::new();
+
+        // 3. Update memory and DB
+        self.task_manager.add_task(task.clone());
+        if let Some(db) = &self.db {
+            db.save_task(&task)?;
+        }
+
+        // 4. Broadcast and notify
+        self.broadcast_task_update(&task);
+        self.wake_workers();
+
+        Ok(task)
+    }
     
+    /// Re-download all tasks in a batch
+    pub async fn redownload_batch_async(&self, batch_id: String) -> crate::error::FlasharrResult<usize> {
+        let db = self.db.as_ref().ok_or_else(|| crate::error::FlasharrError::DatabaseConnection("No database connection".to_string()))?;
+        
+        // 1. Get all tasks for this batch
+        let tasks: Vec<DownloadTask> = db.get_tasks_by_batch_id_async(batch_id).await?;
+        if tasks.is_empty() {
+            return Ok(0);
+        }
+
+        let total = tasks.len();
+        
+        // 2. Trigger redownload for each task
+        for task in tasks {
+            // We can ignore errors for individual tasks in a batch re-download
+            // to allow as many as possible to restart
+            let _ = self.redownload_task(task.id).await;
+        }
+
+        Ok(total)
+    }
+
     /// Spawn a worker
     fn spawn_worker(&self, worker_id: usize) -> JoinHandle<()> {
         let running = self.running.clone();
@@ -1581,8 +1730,10 @@ impl DownloadOrchestrator {
     }
 
     
-    /// Move completed download to Sonarr/Radarr's series/movie folder
-    /// Returns updated task if file was moved successfully, None otherwise
+    /// Symlink completed download into Sonarr/Radarr's series/movie folder.
+    /// The source file stays in the downloads directory; a symlink is placed
+    /// at the arr library path so Sonarr/Radarr (and Jellyfin) can find it.
+    /// Returns updated task with the symlink path as destination.
     async fn move_to_arr_path(
         task: &DownloadTask,
         arr_client: &Arc<tokio::sync::RwLock<Option<Arc<crate::arr::ArrClient>>>>,
@@ -1612,8 +1763,23 @@ impl DownloadOrchestrator {
                                 id as i64
                             }
                             Ok(None) => {
-                                tracing::warn!("Series not found in Sonarr for TMDB {}", tmdb_id);
-                                return None;
+                                // Safety net: artifact manager should have added this at grab time.
+                                // If missing, auto-add now as fallback.
+                                tracing::warn!("Series not in Sonarr for TMDB {} (artifact manager missed?) — auto-adding as fallback", tmdb_id);
+                                let root_path = match client.get_sonarr_root_folders().await {
+                                    Ok(folders) => folders.first().map(|f| f.path.clone()).unwrap_or_else(|| "/data/media/tv".to_string()),
+                                    Err(_) => "/data/media/tv".to_string(),
+                                };
+                                match client.add_series_by_tmdb(tmdb_id, 1, &root_path).await {
+                                    Ok(id) => {
+                                        tracing::info!("Fallback: added series to Sonarr TMDB {} -> ID {}", tmdb_id, id);
+                                        id as i64
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Fallback: failed to add series to Sonarr for TMDB {}: {}", tmdb_id, e);
+                                        return None;
+                                    }
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!("Failed to look up series by TMDB {}: {}", tmdb_id, e);
@@ -1643,8 +1809,23 @@ impl DownloadOrchestrator {
                                 id as i64
                             }
                             Ok(None) => {
-                                tracing::warn!("Movie not found in Radarr for TMDB {}", tmdb_id);
-                                return None;
+                                // Safety net: artifact manager should have added this at grab time.
+                                // If missing, auto-add now as fallback.
+                                tracing::warn!("Movie not in Radarr for TMDB {} (artifact manager missed?) — auto-adding as fallback", tmdb_id);
+                                let root_path = match client.get_radarr_root_folders().await {
+                                    Ok(folders) => folders.first().map(|f| f.path.clone()).unwrap_or_else(|| "/data/media/movies".to_string()),
+                                    Err(_) => "/data/media/movies".to_string(),
+                                };
+                                match client.add_movie_by_tmdb(tmdb_id, 1, &root_path).await {
+                                    Ok(id) => {
+                                        tracing::info!("Fallback: added movie to Radarr TMDB {} -> ID {}", tmdb_id, id);
+                                        id as i64
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Fallback: failed to add movie to Radarr for TMDB {}: {}", tmdb_id, e);
+                                        return None;
+                                    }
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!("Failed to look up movie by TMDB {}: {}", tmdb_id, e);
@@ -1672,7 +1853,7 @@ impl DownloadOrchestrator {
             MediaType::TvSeries | MediaType::TvEpisode => {
                 // TV: {series_path}/Season XX/
                 let season = task.tmdb_season.unwrap_or(1);
-                std::path::PathBuf::from(&arr_folder).join(format!("Season {:02}", season))
+                std::path::PathBuf::from(&arr_folder).join(format!("Season {}", season))
             }
             MediaType::Movie => {
                 // Movie: {movie_path}/
@@ -1682,45 +1863,79 @@ impl DownloadOrchestrator {
         
         let target_path = target_dir.join(filename);
         
-        // Don't move if source and target are the same
+        // If source and target are the same, file is already at arr path — just trigger rescan
         if source == target_path {
-            tracing::debug!("File already at target path: {:?}", target_path);
-            return None;
+            tracing::info!("File already at target path: {:?} — triggering rescan only", target_path);
+            let rescan_result = match media_type {
+                MediaType::TvSeries | MediaType::TvEpisode => {
+                    client.trigger_series_rescan(arr_id).await
+                }
+                MediaType::Movie => {
+                    client.trigger_movie_refresh(arr_id).await
+                }
+            };
+            if let Err(e) = rescan_result {
+                tracing::warn!("Arr rescan trigger failed (non-fatal): {}", e);
+            }
+            
+            // Return updated task even if already there, to ensure announced = true
+            let mut updated = task.clone();
+            updated.arr_announced = true;
+            match media_type {
+                MediaType::TvSeries | MediaType::TvEpisode => updated.arr_series_id = Some(arr_id as i64),
+                MediaType::Movie => updated.arr_movie_id = Some(arr_id as i64),
+            }
+            return Some(updated);
         }
-        
+
         // Create target directory
         if let Err(e) = tokio::fs::create_dir_all(&target_dir).await {
             tracing::error!("Failed to create target directory {:?}: {}", target_dir, e);
             return None;
         }
-        
-        // Move (rename) file to target
+
+        // If a symlink or file already exists at target, remove it first (re-grab scenario)
+        if target_path.exists() || tokio::fs::symlink_metadata(&target_path).await.is_ok() {
+            tracing::info!("Removing existing file/symlink at {:?}", target_path);
+            let _ = tokio::fs::remove_file(&target_path).await;
+        }
+
+        // Move file: target_path -> source (file moves from downloads to library)
         tracing::info!(
             "Moving completed file to arr path: {:?} -> {:?}",
             source, target_path
         );
-        
-        // Move file and trigger Arr rescan on success
+
         let move_result = match tokio::fs::rename(&source, &target_path).await {
             Ok(()) => {
-                tracing::info!("Successfully moved file to {:?}", target_path);
+                tracing::info!("Successfully moved {:?} -> {:?}", source, target_path);
                 let mut updated = task.clone();
                 updated.destination = target_path.to_string_lossy().to_string();
+                updated.arr_announced = true;
+                match media_type {
+                    MediaType::TvSeries | MediaType::TvEpisode => updated.arr_series_id = Some(arr_id as i64),
+                    MediaType::Movie => updated.arr_movie_id = Some(arr_id as i64),
+                }
                 Some(updated)
             }
             Err(e) => {
-                // rename fails across filesystems, fall back to copy+delete
-                tracing::warn!("rename failed (cross-device?): {}, trying copy+delete", e);
+                // If rename fails (e.g. cross-device), try to copy and remove
+                tracing::warn!("Failed to rename {:?} -> {:?}: {}. Trying copy+remove fallback.", source, target_path, e);
                 match tokio::fs::copy(&source, &target_path).await {
                     Ok(_) => {
                         let _ = tokio::fs::remove_file(&source).await;
-                        tracing::info!("Successfully copied file to {:?}", target_path);
+                        tracing::info!("Successfully copied and removed {:?} -> {:?}", source, target_path);
                         let mut updated = task.clone();
                         updated.destination = target_path.to_string_lossy().to_string();
+                        updated.arr_announced = true;
+                        match media_type {
+                            MediaType::TvSeries | MediaType::TvEpisode => updated.arr_series_id = Some(arr_id as i64),
+                            MediaType::Movie => updated.arr_movie_id = Some(arr_id as i64),
+                        }
                         Some(updated)
                     }
                     Err(copy_err) => {
-                        tracing::error!("Failed to copy file to {:?}: {}", target_path, copy_err);
+                        tracing::error!("Failed to move or copy {:?} -> {:?}: {}", source, target_path, copy_err);
                         None
                     }
                 }

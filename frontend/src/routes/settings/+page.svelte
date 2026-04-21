@@ -583,7 +583,7 @@
             <div class="inline-field">
               <span class="inline-label">KEY</span><span
                 class="inline-value mono"
-                >{showApiKey ? indexerApiKey : "•".repeat(12)}</span
+                >{indexerApiKey ? (showApiKey ? indexerApiKey : "•".repeat(12)) : "(no key — generating…)"}</span
               ><button
                 class="copy-inline-btn"
                 onclick={() => (showApiKey = !showApiKey)}
@@ -746,7 +746,7 @@
             <div class="inline-field">
               <span class="inline-label">KEY</span><span
                 class="inline-value mono"
-                >{showApiKey ? indexerApiKey : "•".repeat(12)}</span
+                >{indexerApiKey ? (showApiKey ? indexerApiKey : "•".repeat(12)) : "(no key — generating…)"}</span
               ><button
                 class="copy-inline-btn"
                 onclick={() => (showApiKey = !showApiKey)}

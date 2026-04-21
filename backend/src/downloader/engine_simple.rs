@@ -28,7 +28,9 @@ impl SimpleDownloadEngine {
         let http_client = reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
             .pool_max_idle_per_host(10)
-            .timeout(std::time::Duration::from_secs(300))
+            .connect_timeout(std::time::Duration::from_secs(60))
+            .tcp_keepalive(Some(std::time::Duration::from_secs(60)))
+            .timeout(std::time::Duration::from_secs(86400)) // 24h total timeout for large files
             .build()
             .expect("Failed to create HTTP client");
         

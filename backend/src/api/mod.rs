@@ -1,5 +1,7 @@
 //! API module - REST endpoints
 
+pub mod auth;
+
 pub mod arr;
 pub mod downloads;
 pub mod stats;

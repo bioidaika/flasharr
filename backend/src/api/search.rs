@@ -129,15 +129,12 @@ async fn enhanced_search(
                         let keywords = get_title_keywords(&params.q);
                         let matched_count = (keywords.len() as f32 * sim_res.score).round() as i32;
                         
-                        let mut score = matched_count * 10;
-                        score += (sim_res.score * 50.0) as i32;
-                        
-                        if parsed.year.is_some() { score += 20; }
-                        if parsed.resolution.is_some() { score += 10; }
-                        if parsed.viet_dub || parsed.viet_sub { score += 15; }
-                        
+                        // Score = relevance + quality (total_score handles resolution/source/HDR/codec/vietsub)
+                        let relevance = matched_count * 10 + (sim_res.score * 50.0) as i32;
+                        let quality = parsed.total_score();
                         let size_gb = size as f64 / (1024.0 * 1024.0 * 1024.0);
-                        score += (size_gb.min(10.0) * 5.0) as i32;
+                        let size_bonus = (size_gb.min(10.0) * 5.0) as i32;
+                        let mut score = relevance + quality + size_bonus;
                         
                         // Relaxed Similarity Penalty (V2 parity: only punish extremely low matches)
                         if sim_res.score < 0.3 { score -= 100; }

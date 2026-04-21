@@ -49,7 +49,7 @@ pub struct SmartSearchRequest {
 
 #[derive(Deserialize)]
 struct PopularQuery {
-    #[serde(default = "default_media_type")]
+    #[serde(default = "default_media_type", alias = "type")]
     media_type: String,
     #[serde(default = "default_limit")]
     limit: usize,
@@ -260,17 +260,15 @@ async fn smart_search(
 
         let fcode = url.split("/file/").last().unwrap_or("").to_string();
         
-        // Calculate Score (V2 Parity)
+        // Score = relevance (title similarity) + quality (source/resolution/HDR/audio/etc.)
+        // Relevance acts as a minor tiebreaker; total_score() from the smart tokenizer
+        // dominates ranking so the best-quality file wins among equally-relevant results.
         let matched_count = (search_keywords.len() as f32 * sim_res.score).round() as i32;
-        let mut score = matched_count * 10;
-        score += (sim_res.score * 50.0) as i32;
-        
-        if parsed.year.is_some() { score += 20; }
-        if parsed.resolution.is_some() { score += 10; }
-        if parsed.viet_dub || parsed.viet_sub { score += 15; }
-        
+        let relevance = matched_count * 10 + (sim_res.score * 50.0) as i32;
+        let quality = parsed.total_score(); // 10-355: source×resolution + HDR/DV/codec/audio/vietsub
         let size_gb = item["size"].as_u64().unwrap_or(0) as f64 / (1024.0 * 1024.0 * 1024.0);
-        score += (size_gb.min(10.0) * 5.0) as i32;
+        let size_bonus = (size_gb.min(10.0) * 5.0) as i32;
+        let score = relevance + quality + size_bonus;
 
         filtered_results.push(SearchResult {
             name: parsed.title,
