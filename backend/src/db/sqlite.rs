@@ -342,9 +342,7 @@ impl Db {
                 task.tmdb_episode.map(|e| e as i64),
                 &task.quality,
                 &task.resolution,
-                // Note: These fields are usually set by other tools but we should preserve them
-                // We'll read them from the task if they are set
-                task.arr_series_id.is_some() || task.arr_movie_id.is_some(), // Infer announced if we have IDs
+                task.arr_announced,
                 task.arr_series_id,
                 task.arr_movie_id,
                 None::<String>, // arr_announce_error - keep simple for now
@@ -428,10 +426,12 @@ impl Db {
             tmdb_title: row.get(24).ok().flatten(),
             tmdb_season: row.get::<_, Option<i64>>(25).ok().flatten().map(|s| s as u32),
             tmdb_episode: row.get::<_, Option<i64>>(26).ok().flatten().map(|e| e as u32),
-            quality: row.get::<_, Option<String>>(27).ok().flatten(),
-            resolution: row.get::<_, Option<String>>(28).ok().flatten(),
-            arr_series_id: row.get::<_, Option<i64>>(29).ok().flatten(),
-            arr_movie_id: row.get::<_, Option<i64>>(30).ok().flatten(),
+            arr_announced: row.get::<_, Option<bool>>(27).ok().flatten().unwrap_or(false),
+            arr_series_id: row.get::<_, Option<i64>>(28).ok().flatten(),
+            arr_movie_id: row.get::<_, Option<i64>>(29).ok().flatten(),
+            arr_announce_error: row.get::<_, Option<String>>(30).ok().flatten(),
+            quality: row.get::<_, Option<String>>(32).ok().flatten(),
+            resolution: row.get::<_, Option<String>>(33).ok().flatten(),
             url_metadata: None,  // Not stored in DB yet, will be set on URL resolution
             error_history: Vec::new(),  // Not stored in DB, will be populated on errors
             fshare_code: row.get::<_, Option<String>>(31).ok().flatten(),
@@ -445,10 +445,11 @@ impl Db {
         let conn = self.pool.get().map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         let mut stmt = conn.prepare(
             "SELECT id, url, original_url, filename, destination, state, progress, size, 
-             downloaded, speed, eta,
-             host, category, priority, segments, retry_count, created_at, 
-             started_at, completed_at, wait_until, error_message, batch_id, batch_name,
-             tmdb_id, tmdb_title, tmdb_season, tmdb_episode, quality, resolution, arr_series_id, arr_movie_id 
+             downloaded, speed, eta, host, category, priority, segments, retry_count,
+             created_at, started_at, completed_at, wait_until, error_message, 
+             batch_id, batch_name, tmdb_id, tmdb_title, tmdb_season, tmdb_episode,
+             arr_announced, arr_series_id, arr_movie_id, arr_announce_error, fshare_code,
+             quality, resolution
              FROM downloads"
         )?;
         let task_iter = stmt.query_map([], |row| Self::parse_task_from_row(row))?;
@@ -466,10 +467,11 @@ impl Db {
         let conn = self.pool.get().map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         let mut stmt = conn.prepare(
             "SELECT id, url, original_url, filename, destination, state, progress, size, 
-             downloaded, speed, eta,
-             host, category, priority, segments, retry_count, created_at, 
-             started_at, completed_at, wait_until, error_message, batch_id, batch_name,
-             tmdb_id, tmdb_title, tmdb_season, tmdb_episode, quality, resolution, arr_series_id, arr_movie_id 
+             downloaded, speed, eta, host, category, priority, segments, retry_count,
+             created_at, started_at, completed_at, wait_until, error_message, 
+             batch_id, batch_name, tmdb_id, tmdb_title, tmdb_season, tmdb_episode,
+             arr_announced, arr_series_id, arr_movie_id, arr_announce_error, fshare_code,
+             quality, resolution
              FROM downloads WHERE id = ?1"
         )?;
         let mut task_iter = stmt.query_map(params![id.to_string()], |row| Self::parse_task_from_row(row))?;
@@ -527,15 +529,45 @@ impl Db {
         Ok((tasks, total))
     }
 
+    /// Get recent download history for a host
+    pub async fn get_history_async(&self, host: &str) -> Result<Vec<DownloadTask>> {
+        let db = self.pool.clone();
+        let host = host.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = db.get().map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            let mut stmt = conn.prepare(
+                "SELECT id, url, original_url, filename, destination, state, progress, size, 
+                 downloaded, speed, eta, host, category, priority, segments, retry_count,
+                 created_at, started_at, completed_at, wait_until, error_message, 
+                 batch_id, batch_name, tmdb_id, tmdb_title, tmdb_season, tmdb_episode,
+                 arr_announced, arr_series_id, arr_movie_id, arr_announce_error, fshare_code,
+                 quality, resolution
+                 FROM downloads 
+                 WHERE host = ?1
+                 ORDER BY created_at DESC
+                 LIMIT 100"
+            )?;
+            let task_iter = stmt.query_map(params![host], |row| Db::parse_task_from_row(row))?;
+            let mut tasks = Vec::new();
+            for task in task_iter {
+                if let Ok(t) = task {
+                    tasks.push(t);
+                }
+            }
+            Ok(tasks)
+        }).await.map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
+    }
+
     /// Get the next queued task for workers to process (FIFO with priority)
     pub fn get_next_queued_task(&self) -> Result<Option<DownloadTask>> {
         let conn = self.pool.get().map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         let mut stmt = conn.prepare(
             "SELECT id, url, original_url, filename, destination, state, progress, size, 
-             downloaded, speed, eta,
-             host, category, priority, segments, retry_count, created_at, 
-             started_at, completed_at, wait_until, error_message, batch_id, batch_name,
-             tmdb_id, tmdb_title, tmdb_season, tmdb_episode, quality, resolution, arr_series_id, arr_movie_id 
+             downloaded, speed, eta, host, category, priority, segments, retry_count,
+             created_at, started_at, completed_at, wait_until, error_message, 
+             batch_id, batch_name, tmdb_id, tmdb_title, tmdb_season, tmdb_episode,
+             arr_announced, arr_series_id, arr_movie_id, arr_announce_error, fshare_code,
+             quality, resolution
              FROM downloads 
              WHERE state = 'QUEUED'
              ORDER BY priority DESC, created_at ASC
@@ -557,10 +589,11 @@ impl Db {
         
         let mut stmt = conn.prepare(
             "SELECT id, url, original_url, filename, destination, state, progress, size, 
-             downloaded, speed, eta,
-             host, category, priority, segments, retry_count, created_at, 
-             started_at, completed_at, wait_until, error_message, batch_id, batch_name,
-             tmdb_id, tmdb_title, tmdb_season, tmdb_episode, quality, resolution, arr_series_id, arr_movie_id 
+             downloaded, speed, eta, host, category, priority, segments, retry_count,
+             created_at, started_at, completed_at, wait_until, error_message, 
+             batch_id, batch_name, tmdb_id, tmdb_title, tmdb_season, tmdb_episode,
+             arr_announced, arr_series_id, arr_movie_id, arr_announce_error, fshare_code,
+             quality, resolution
              FROM downloads 
              WHERE state = 'WAITING' AND (wait_until IS NULL OR wait_until <= ?1)
              ORDER BY created_at ASC"
@@ -702,7 +735,7 @@ impl Db {
                  downloaded, speed, eta,
                  host, category, priority, segments, retry_count, created_at, 
                  started_at, completed_at, wait_until, error_message, batch_id, batch_name,
-                 tmdb_id, tmdb_title, tmdb_season, tmdb_episode, quality, resolution, arr_series_id, arr_movie_id 
+                 tmdb_id, tmdb_title, tmdb_season, tmdb_episode, arr_announced, arr_series_id, arr_movie_id, arr_announce_error, fshare_code, quality, resolution 
                  FROM downloads 
                  {}
                  ORDER BY {}
@@ -737,10 +770,11 @@ impl Db {
                     // Get all downloads for this batch
                     let batch_query = format!(
                         "SELECT id, url, original_url, filename, destination, state, progress, size, 
-                         downloaded, speed, eta,
-                         host, category, priority, segments, retry_count, created_at, 
-                         started_at, completed_at, wait_until, error_message, batch_id, batch_name,
-                         tmdb_id, tmdb_title, tmdb_season, tmdb_episode, quality, resolution, arr_series_id, arr_movie_id 
+                         downloaded, speed, eta, host, category, priority, segments, retry_count,
+                         created_at, started_at, completed_at, wait_until, error_message, 
+                         batch_id, batch_name, tmdb_id, tmdb_title, tmdb_season, tmdb_episode,
+                         arr_announced, arr_series_id, arr_movie_id, arr_announce_error, fshare_code,
+                         quality, resolution
                          FROM downloads 
                          WHERE batch_id = ?1
                          {}",
@@ -839,7 +873,8 @@ impl Db {
                         downloaded, speed, eta, host, category, priority, segments, retry_count,
                         created_at, started_at, completed_at, wait_until, error_message, 
                         batch_id, batch_name, tmdb_id, tmdb_title, tmdb_season, tmdb_episode,
-                        quality, resolution, arr_series_id, arr_movie_id
+                        arr_announced, arr_series_id, arr_movie_id, arr_announce_error, fshare_code,
+                        quality, resolution
                  FROM downloads 
                  WHERE state IN ({})
                  ORDER BY priority DESC, created_at ASC",
@@ -1119,9 +1154,11 @@ impl Db {
             // Step 2: Get standalone downloads (no batch_id)
             let standalone_query = format!(
                 "SELECT id, url, original_url, filename, destination, state, progress, size, 
-                 downloaded, speed, eta, host, category, priority, segments, retry_count, created_at, 
-                 started_at, completed_at, wait_until, error_message, batch_id, batch_name,
-                 tmdb_id, tmdb_title, tmdb_season, tmdb_episode, quality, resolution, arr_series_id, arr_movie_id
+                 downloaded, speed, eta, host, category, priority, segments, retry_count,
+                 created_at, started_at, completed_at, wait_until, error_message, 
+                 batch_id, batch_name, tmdb_id, tmdb_title, tmdb_season, tmdb_episode,
+                 arr_announced, arr_series_id, arr_movie_id, arr_announce_error, fshare_code,
+                 quality, resolution
                  FROM downloads 
                  WHERE batch_id IS NULL {}
                  ORDER BY created_at DESC",
@@ -1722,11 +1759,12 @@ impl Db {
             Some(media) => {
                 let conn = self.pool.get().map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
                 let mut stmt = conn.prepare(
-                    "SELECT id, url, original_url, filename, destination, state, progress, size,
-                            downloaded, speed, eta, host, category, priority, segments, retry_count,
-                            created_at, started_at, completed_at, wait_until, error_message,
-                            batch_id, batch_name, tmdb_id, tmdb_title, tmdb_season, tmdb_episode,
-                            quality, resolution, arr_series_id, arr_movie_id
+                    "SELECT id, url, original_url, filename, destination, state, progress, size, 
+                             downloaded, speed, eta, host, category, priority, segments, retry_count,
+                             created_at, started_at, completed_at, wait_until, error_message, 
+                             batch_id, batch_name, tmdb_id, tmdb_title, tmdb_season, tmdb_episode,
+                             arr_announced, arr_series_id, arr_movie_id, arr_announce_error, fshare_code,
+                             quality, resolution
                      FROM downloads WHERE tmdb_id = ?1
                      ORDER BY created_at DESC"
                 )?;
@@ -1757,11 +1795,12 @@ impl Db {
     pub fn get_downloads_by_tmdb_id(&self, tmdb_id: i64) -> Result<Vec<crate::downloader::task::DownloadTask>> {
         let conn = self.pool.get().map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         let mut stmt = conn.prepare(
-            "SELECT id, url, original_url, filename, destination, state, progress, size,
-                    downloaded, speed, eta, host, category, priority, segments, retry_count,
-                    created_at, started_at, completed_at, wait_until, error_message,
-                    batch_id, batch_name, tmdb_id, tmdb_title, tmdb_season, tmdb_episode,
-                    quality, resolution, arr_series_id, arr_movie_id
+            "SELECT id, url, original_url, filename, destination, state, progress, size, 
+                     downloaded, speed, eta, host, category, priority, segments, retry_count,
+                     created_at, started_at, completed_at, wait_until, error_message, 
+                     batch_id, batch_name, tmdb_id, tmdb_title, tmdb_season, tmdb_episode,
+                     arr_announced, arr_series_id, arr_movie_id, arr_announce_error, fshare_code,
+                     quality, resolution
              FROM downloads WHERE tmdb_id = ?1
              ORDER BY created_at DESC"
         )?;

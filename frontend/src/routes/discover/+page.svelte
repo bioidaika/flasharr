@@ -36,11 +36,12 @@
 
   // ============= OBJECT POOL =============
   // Create fixed pool of 1000 slots - NEVER changes length
-  const pool: PoolSlot[] = Array.from({ length: POOL_SIZE }, (_, i) => ({
+  // Must be $state so Svelte 5 tracks in-place mutations to pool[i].visible / .data
+  let pool = $state<PoolSlot[]>(Array.from({ length: POOL_SIZE }, (_, i) => ({
     slotId: i,
     visible: false,
     data: null,
-  }));
+  })));
 
   // Track the next available slot index
   let nextPoolIndex = 0;

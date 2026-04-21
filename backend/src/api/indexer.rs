@@ -111,7 +111,7 @@ async fn handle_indexer(
     let (status, xml_body) = match params.t.as_str() {
         "caps" => (StatusCode::OK, handle_caps()),
         "search" => {
-            if !validate_api_key(&state, &params.apikey) {
+            if !crate::api::auth::validate_api_key(&state, &params.apikey) {
                 tracing::warn!("Invalid API key provided: {:?}", params.apikey);
                 (StatusCode::UNAUTHORIZED, generate_error_xml("Invalid API key"))
             } else {
@@ -119,7 +119,7 @@ async fn handle_indexer(
             }
         },
         "tvsearch" => {
-            if !validate_api_key(&state, &params.apikey) {
+            if !crate::api::auth::validate_api_key(&state, &params.apikey) {
                 tracing::warn!("Invalid API key provided: {:?}", params.apikey);
                 (StatusCode::UNAUTHORIZED, generate_error_xml("Invalid API key"))
             } else {
@@ -127,7 +127,7 @@ async fn handle_indexer(
             }
         },
         "movie" => {
-            if !validate_api_key(&state, &params.apikey) {
+            if !crate::api::auth::validate_api_key(&state, &params.apikey) {
                 tracing::warn!("Invalid API key provided: {:?}", params.apikey);
                 (StatusCode::UNAUTHORIZED, generate_error_xml("Invalid API key"))
             } else {
@@ -679,20 +679,6 @@ async fn handle_movie_search(
 // Helper Functions
 // ============================================================================
 
-/// Validate API key
-fn validate_api_key(state: &AppState, provided: &str) -> bool {
-    // Get API key from database (where UI saves it)
-    let config_key = state.db.get_setting("indexer_api_key")
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| "flasharr-default-key".to_string());
-    
-    // DEBUG: See exactly what is happening in the logs
-    tracing::info!("Auth Check: Provided='{}', Expected='{}', Match={}", 
-        provided, &config_key, provided == config_key);
-    
-    !provided.is_empty() && provided == config_key
-}
 
 /// Execute Fshare search and convert to indexer results
 async fn execute_fshare_search_for_indexer(

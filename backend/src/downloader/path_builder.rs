@@ -81,9 +81,9 @@ impl PathBuilder {
                     };
                     
                     let season_folder = if let Some(season) = meta.season {
-                        format!("Season {:02}", season)
+                        format!("Season {}", season)
                     } else {
-                        "Season 01".to_string()
+                        "Season 1".to_string()
                     };
                     
                     base_dir.join(&series_folder)

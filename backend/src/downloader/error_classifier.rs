@@ -57,7 +57,7 @@ impl ErrorClassifier {
         // "request or response body error: operation timed out"
         if error_str.contains("timeout") || error_str.contains("timed out") || error_str.contains("operation timed out") {
             return ErrorCategory::Retryable {
-                max_retries: 10,
+                max_retries: 20, // Increased for large, slow media
                 delay_seconds: 5,
                 reason: "Network timeout - server too slow or connection dropped".to_string(),
             };

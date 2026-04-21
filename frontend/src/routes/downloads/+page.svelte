@@ -539,6 +539,13 @@
     }
   }
 
+  async function redownload(id: string) {
+    const result = await downloadStore.redownload(id);
+    if (!result.success) {
+      toasts.error(`Failed to re-download: ${result.error}`);
+    }
+  }
+
   async function pauseAll() {
     const result = await downloadStore.pauseAll();
     if (!result.success) {
@@ -628,6 +635,9 @@
           });
           if (response.ok) toasts.success("Batch resumed");
           break;
+        case "redownload":
+          await downloadStore.redownloadBatch(batchId);
+          break;
         case "delete":
           // Find batch info for confirmation modal
           const batch = filteredBatches.find((b) => b.batchId === batchId);
@@ -655,6 +665,9 @@
         break;
       case "retry":
         await retryDownload(id);
+        break;
+      case "redownload":
+        await redownload(id);
         break;
     }
     hideContextMenu();
@@ -1714,6 +1727,20 @@
                       Start
                     </button>
                   {/if}
+
+                  {#if download.state === "COMPLETED" || download.state === "FAILED" || download.state === "PAUSED" || download.state === "CANCELLED"}
+                    <button
+                      class="mobile-action-btn"
+                      style="color: var(--color-secondary, #00f3ff)"
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        handleAction("redownload", download.id);
+                      }}
+                    >
+                      <span class="material-icons">cloud_download</span>
+                      Re-download
+                    </button>
+                  {/if}
                   <button
                     class="mobile-action-btn action-details"
                     onclick={(e) => {
@@ -1898,22 +1925,19 @@
 
 <!-- V2 Style Context Menu -->
 {#if contextMenuId}
-  {@const allDownloads = [
-    ...downloadStore.downloadList,
-    ...Array.from(downloadStore.batchItems.values()).flat(),
-  ]}
-  {#each allDownloads.filter((d) => d.id === contextMenuId) as download}
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <div
-      class="context-menu"
-      style="left: {contextMenuPos.x}px; top: {contextMenuPos.y}px;"
-      onclick={(e) => e.stopPropagation()}
-      onkeydown={(e) => {
-        if (e.key === "Escape") hideContextMenu();
-      }}
-      role="menu"
-      tabindex="-1"
-    >
+    {@const download = [...downloadStore.downloadList, ...Array.from(downloadStore.batchItems.values()).flat()].find(d => d.id === contextMenuId)}
+    {#if download}
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <div
+        class="context-menu"
+        style="left: {contextMenuPos.x}px; top: {contextMenuPos.y}px;"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => {
+          if (e.key === "Escape") hideContextMenu();
+        }}
+        role="menu"
+        tabindex="-1"
+      >
       <!-- V2: Header with filename -->
       <div class="context-header">
         {download.filename.length > 40
@@ -1938,14 +1962,6 @@
           <span class="material-icons">play_arrow</span>
           Resume Download
         </button>
-      {:else if download.state === "FAILED"}
-        <button
-          class="context-item"
-          onclick={() => handleAction("retry", contextMenuId!)}
-        >
-          <span class="material-icons">refresh</span>
-          Retry Download
-        </button>
       {:else if download.state === "QUEUED" || download.state === "WAITING"}
         <button
           class="context-item"
@@ -1953,6 +1969,18 @@
         >
           <span class="material-icons">play_arrow</span>
           Start Now
+        </button>
+      {/if}
+
+      <!-- Re-download option: available for non-active states -->
+      {#if download.state === "COMPLETED" || download.state === "FAILED" || download.state === "PAUSED" || download.state === "CANCELLED"}
+        <button
+          class="context-item"
+          onclick={() => handleAction("redownload", contextMenuId!)}
+          style="color: var(--color-secondary, #00f3ff)"
+        >
+          <span class="material-icons">cloud_download</span>
+          Re-download Task
         </button>
       {/if}
 
@@ -2009,7 +2037,7 @@
         Delete Task
       </button>
     </div>
-  {/each}
+    {/if}
 {/if}
 
 <!-- Batch Context Menu -->
@@ -2054,6 +2082,15 @@
     >
       <span class="material-icons">info_outline</span>
       View Details
+    </button>
+
+    <button
+      class="context-item"
+      onclick={() => handleBatchAction("redownload", batchContextMenuId!)}
+      style="color: var(--color-secondary, #00f3ff)"
+    >
+      <span class="material-icons">cloud_download</span>
+      Re-download All Tasks
     </button>
 
     <div class="context-divider"></div>

@@ -767,6 +767,56 @@ class DownloadStore {
   }
 
   /**
+   * Re-download a completed download
+   */
+  async redownload(id: string): Promise<ApiResponse<void>> {
+    try {
+      const response = await fetch(`${API_BASE}/downloads/${id}/redownload`, {
+        method: 'POST',
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || `HTTP ${response.status}`);
+      }
+
+      toasts.success('Re-download initiated');
+      return { success: true };
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Failed to re-download';
+      console.error('[DownloadStore] Redownload error:', errorMsg);
+      toasts.error(`Failed to re-download: ${errorMsg}`);
+      return { success: false, error: errorMsg };
+    }
+  }
+
+  /**
+   * Re-download all tasks in a batch
+   */
+  async redownloadBatch(id: string): Promise<ApiResponse<{ affected: number }>> {
+    try {
+      const response = await fetch(`${API_BASE}/downloads/batch/${id}/redownload`, {
+        method: 'POST',
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || `HTTP ${response.status}`);
+      }
+
+      toasts.success(`Re-download initiated for ${data.affected} task${data.affected !== 1 ? 's' : ''}`);
+      this.fetchBatches().catch(() => {});
+      return { success: true, data };
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Failed to re-download batch';
+      console.error('[DownloadStore] Redownload batch error:', errorMsg);
+      toasts.error(`Failed to re-download batch: ${errorMsg}`);
+      return { success: false, error: errorMsg };
+    }
+  }
+
+  /**
    * Pause all active downloads
    */
   async pauseAll(): Promise<ApiResponse<{ affected: number }>> {

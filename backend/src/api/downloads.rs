@@ -25,6 +25,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/:id/pause", post(pause_download))
         .route("/:id/resume", post(resume_download))
         .route("/:id/retry", post(retry_download))
+        .route("/:id/redownload", post(redownload_download))
         .route("/pause-all", post(pause_all))
         .route("/resume-all", post(resume_all))
         .route("/stats", get(get_stats))
@@ -32,10 +33,13 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/batch/:batch_id/pause", post(pause_batch))
         .route("/batch/:batch_id/resume", post(resume_batch))
         .route("/batch/:batch_id", delete(delete_batch))
+        .route("/batch/:batch_id/redownload", post(redownload_batch))
         .route("/batch/:batch_id/progress", get(get_batch_progress))
         .route("/batch/:batch_id/items", get(get_batch_items))
         // Batch summaries for pagination
         .route("/batches", get(list_batch_summaries))
+        // Maintenance
+        .route("/backfill", post(backfill_arr_paths))
 }
 
 // ============================================================================
@@ -499,6 +503,28 @@ async fn retry_download(
     }))
 }
 
+/// POST /api/downloads/:id/redownload - Re-download task using original data
+async fn redownload_download(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ActionResponse>, StatusCode> {
+    let uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    
+    match state.download_orchestrator.redownload_task(uuid).await {
+        Ok(_) => Ok(Json(ActionResponse {
+            success: true,
+            message: None,
+        })),
+        Err(e) => {
+            tracing::error!("Failed to re-download task {}: {}", uuid, e);
+            Ok(Json(ActionResponse {
+                success: false,
+                message: Some(format!("Failed to re-download: {}", e)),
+            }))
+        }
+    }
+}
+
 /// POST /api/downloads/pause-all - Pause all active downloads
 /// Delegates to Orchestrator which handles: DB (atomic) → TaskManager → Broadcast
 async fn pause_all(
@@ -570,12 +596,26 @@ async fn delete_batch(
     Path(batch_id): Path<String>,
 ) -> Json<BulkActionResponse> {
     match state.download_service.delete_batch(&batch_id).await {
+        Ok(affected) => Json(BulkActionResponse { success: true, affected }),
+        Err(e) => {
+            tracing::error!("Failed to delete batch {}: {}", batch_id, e);
+            Json(BulkActionResponse { success: false, affected: 0 })
+        }
+    }
+}
+
+/// POST /api/downloads/batch/:batch_id/redownload - Re-download all tasks in a batch
+async fn redownload_batch(
+    State(state): State<Arc<AppState>>,
+    Path(batch_id): Path<String>,
+) -> Json<BulkActionResponse> {
+    match state.download_orchestrator.redownload_batch_async(batch_id.clone()).await {
         Ok(affected) => {
-            tracing::info!("Deleted batch {}: {} tasks", batch_id, affected);
+            tracing::info!("Re-downloaded batch {}: {} tasks", batch_id, affected);
             Json(BulkActionResponse { success: true, affected })
         }
         Err(e) => {
-            tracing::error!("Failed to delete batch {}: {}", batch_id, e);
+            tracing::error!("Failed to re-download batch {}: {}", batch_id, e);
             Json(BulkActionResponse { success: false, affected: 0 })
         }
     }
@@ -804,4 +844,48 @@ async fn get_batch_items(
     }
     
     Ok(Json(tasks_with_realtime))
+}
+
+// ============================================================================
+// Backfill / Maintenance
+// ============================================================================
+
+#[derive(Serialize)]
+struct BackfillResult {
+    task_id: String,
+    filename: String,
+    status: String,
+}
+
+#[derive(Serialize)]
+struct BackfillResponse {
+    success: bool,
+    total_processed: usize,
+    linked: usize,
+    skipped: usize,
+    results: Vec<BackfillResult>,
+}
+
+/// POST /api/downloads/backfill
+/// Re-process all completed downloads: look up Sonarr/Radarr paths and create symlinks.
+async fn backfill_arr_paths(
+    State(state): State<Arc<AppState>>,
+) -> Json<BackfillResponse> {
+    let results = state.download_orchestrator.backfill_arr_paths().await;
+
+    let total_processed = results.len();
+    let linked = results.iter().filter(|(_, _, s)| s.starts_with("linked")).count();
+    let skipped = total_processed - linked;
+
+    let details: Vec<BackfillResult> = results.into_iter().map(|(id, name, status)| {
+        BackfillResult { task_id: id, filename: name, status }
+    }).collect();
+
+    Json(BackfillResponse {
+        success: true,
+        total_processed,
+        linked,
+        skipped,
+        results: details,
+    })
 }

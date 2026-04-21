@@ -1,9 +1,10 @@
 use axum::{
     extract::{Path, State},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
+use serde_json::Value;
 use std::sync::Arc;
 use std::collections::HashMap;
 
@@ -58,9 +59,20 @@ pub struct MediaDownloadsResponse {
     pub total_downloads: usize,
 }
 
+#[derive(Deserialize)]
+pub struct SmartGrabRequest {
+    pub tmdb_id: i64,
+    pub media_type: String, // "movie" or "tv"
+    pub title: String,
+    pub year: Option<String>,
+}
+
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(list_media))
+        .route("/smart-grab", post(smart_grab)) // Un-prefixed: /api/media/smart-grab
+        .route("/history", get(get_media_history))
+        .route("/sync", post(trigger_sync))
         .route("/:tmdb_id", get(get_media_detail))
         .route("/:tmdb_id/episodes", get(get_media_episodes))
         .route("/:tmdb_id/downloads", get(get_media_downloads))
@@ -175,4 +187,50 @@ async fn get_media_downloads(
         episodes,
         total_downloads: total,
     }))
+}
+
+/// POST /api/media/smart-grab
+async fn smart_grab(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<SmartGrabRequest>,
+) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
+    state.discovery_service.smart_grab(
+        payload.tmdb_id,
+        &payload.media_type,
+        &payload.title,
+        payload.year,
+    ).await
+    .map(Json)
+    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))
+}
+
+/// GET /api/media/history — Get download history
+async fn get_media_history(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<crate::downloader::task::DownloadTask>>, (axum::http::StatusCode, String)> {
+    let host = std::env::var("FLASHARR_HOST").unwrap_or_else(|_| "flasharr".to_string());
+    state.db.get_history_async(&host).await
+        .map(Json)
+        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)))
+}
+
+/// POST /api/media/sync — Trigger library synchronization manually
+async fn trigger_sync(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
+    let sync_service = Arc::clone(&state.library_sync_service);
+    
+    // Run sync in a background task so it doesn't timeout the HTTP request
+    tokio::spawn(async move {
+        if let Err(e) = sync_service.sync_all().await {
+            tracing::error!("[API] Manual library sync failed: {}", e);
+        } else {
+            tracing::info!("[API] Manual library sync completed");
+        }
+    });
+    
+    Ok(Json(serde_json::json!({
+        "status": "success",
+        "message": "Library synchronization started in background"
+    })))
 }
