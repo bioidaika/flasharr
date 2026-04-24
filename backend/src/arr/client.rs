@@ -557,33 +557,24 @@ impl ArrClient {
     // Command Methods (trigger Sonarr/Radarr actions)
     // ============================================================================
 
-    /// Trigger Sonarr to import a file from a specific path into the series folder.
-    /// POST /api/v3/command { "name": "DownloadedEpisodesScan", "seriesId": X, "path": "/path/to/file", "importMode": "Move" }
-    /// This is the correct command after moving a file into Sonarr's series directory.
+    /// Trigger Sonarr to rescan its series folder on disk and update its database.
+    /// Uses RescanSeries — correct after moving a file directly into the library path.
+    /// DownloadedEpisodesScan would reject files already inside the library as "not eligible".
     pub async fn trigger_series_rescan(&self, series_id: i64) -> anyhow::Result<()> {
         self.trigger_series_rescan_with_path(series_id, None).await
     }
 
-    /// Trigger Sonarr to rescan/import from a specific file path.
-    pub async fn trigger_series_rescan_with_path(&self, series_id: i64, path: Option<&str>) -> anyhow::Result<()> {
+    /// Trigger Sonarr to rescan the series folder. `path` is unused but kept for call-site
+    /// compatibility — Sonarr's RescanSeries operates at series level, not file level.
+    pub async fn trigger_series_rescan_with_path(&self, series_id: i64, _path: Option<&str>) -> anyhow::Result<()> {
         let config = self.sonarr_config.as_ref()
             .ok_or_else(|| anyhow::anyhow!("Sonarr not configured"))?;
 
         let url = format!("{}/api/v3/command", config.url.trim_end_matches('/'));
-        let body = if let Some(p) = path {
-            serde_json::json!({
-                "name": "DownloadedEpisodesScan",
-                "seriesId": series_id,
-                "path": p,
-                "importMode": "Move"
-            })
-        } else {
-            // Fallback: scan the whole series (without a path hint)
-            serde_json::json!({
-                "name": "RescanSeries",
-                "seriesId": series_id
-            })
-        };
+        let body = serde_json::json!({
+            "name": "RescanSeries",
+            "seriesId": series_id
+        });
 
         let response = self.http_client
             .post(&url)
@@ -595,40 +586,30 @@ impl ArrClient {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            anyhow::bail!("Series scan command failed for series {}: HTTP {} - {}", series_id, status, text);
+            anyhow::bail!("RescanSeries failed for series {}: HTTP {} - {}", series_id, status, text);
         }
 
-        tracing::info!("Triggered DownloadedEpisodesScan for series ID {} (path: {:?})", series_id, path);
+        tracing::info!("Triggered RescanSeries for series ID {}", series_id);
         Ok(())
     }
 
-    /// Trigger Radarr to import a movie file from a specific path.
-    /// POST /api/v3/command { "name": "DownloadedMoviesScan", "movieId": X, "path": "/path/to/file", "importMode": "Move" }
-    /// This is the correct command after moving a file into Radarr's movie directory.
+    /// Trigger Radarr to rescan its movie folder on disk and update its database.
+    /// Uses RescanMovie — correct after moving a file directly into the library path.
     pub async fn trigger_movie_refresh(&self, movie_id: i64) -> anyhow::Result<()> {
         self.trigger_movie_refresh_with_path(movie_id, None).await
     }
 
-    /// Trigger Radarr to import from a specific file path.
-    pub async fn trigger_movie_refresh_with_path(&self, movie_id: i64, path: Option<&str>) -> anyhow::Result<()> {
+    /// Trigger Radarr to rescan the movie folder. `path` is unused — RescanMovie operates
+    /// at movie level, not file level.
+    pub async fn trigger_movie_refresh_with_path(&self, movie_id: i64, _path: Option<&str>) -> anyhow::Result<()> {
         let config = self.radarr_config.as_ref()
             .ok_or_else(|| anyhow::anyhow!("Radarr not configured"))?;
 
         let url = format!("{}/api/v3/command", config.url.trim_end_matches('/'));
-        let body = if let Some(p) = path {
-            serde_json::json!({
-                "name": "DownloadedMoviesScan",
-                "movieId": movie_id,
-                "path": p,
-                "importMode": "Move"
-            })
-        } else {
-            // Fallback: refresh the whole movie entry
-            serde_json::json!({
-                "name": "RefreshMovie",
-                "movieId": movie_id
-            })
-        };
+        let body = serde_json::json!({
+            "name": "RescanMovie",
+            "movieId": movie_id
+        });
 
         let response = self.http_client
             .post(&url)
@@ -640,10 +621,10 @@ impl ArrClient {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            anyhow::bail!("Movie scan command failed for movie {}: HTTP {} - {}", movie_id, status, text);
+            anyhow::bail!("RescanMovie failed for movie {}: HTTP {} - {}", movie_id, status, text);
         }
 
-        tracing::info!("Triggered DownloadedMoviesScan for movie ID {} (path: {:?})", movie_id, path);
+        tracing::info!("Triggered RescanMovie for movie ID {}", movie_id);
         Ok(())
     }
 
