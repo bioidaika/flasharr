@@ -277,16 +277,35 @@ class DownloadStore {
   loading = $state<boolean>(false);
   error = $state<string | null>(null);
 
+  // Private notification system for legacy store subscribers
+  private _subscribers = new Set<(v: DownloadStoreState) => void>();
+
+  private _notify() {
+    if (this._subscribers.size === 0) return;
+    const snapshot = {
+      downloads: this.downloads,
+      batches: this.batches,
+      batchItems: this.batchItems,
+      stats: this.stats,
+      statusCounts: this.statusCounts,
+      pagination: this.pagination,
+      loading: this.loading,
+      error: this.error,
+    };
+    this._subscribers.forEach(fn => fn(snapshot));
+  }
+
   // ---------------------------------------------------------------------------
   // Derived values
   // ---------------------------------------------------------------------------
 
   /** Downloads as array (sorted by created_at desc) */
-  downloadList: DownloadTask[] = $derived.by(() =>
-    Array.from(this.downloads.values()).sort(
+  downloadList: DownloadTask[] = $derived.by(() => {
+    const list = Array.from(this.downloads.values()).sort(
       (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-    )
-  );
+    );
+    return list;
+  });
 
   /** Batches as array (sorted by created_at desc) */
   batchList: BatchSummary[] = $derived.by(() =>
@@ -516,6 +535,8 @@ class DownloadStore {
         totalPages: data.total_pages,
       };
       this.loading = false;
+      this._notify();
+      console.log('[Store] fetchAll complete, items:', this.downloads.size);
 
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to fetch batches';
@@ -975,6 +996,7 @@ class DownloadStore {
           newDownloads.set(task.id, task);
         });
         this.downloads = newDownloads;
+        this._notify();
       }
     });
 
@@ -984,6 +1006,7 @@ class DownloadStore {
         const newDownloads = new Map(this.downloads);
         newDownloads.set(message.task.id, message.task);
         this.downloads = newDownloads;
+        this._notify();
 
         // If task has batch_id, refetch batches to update grouping
         if (message.task.batch_id) {
@@ -1043,6 +1066,7 @@ class DownloadStore {
 
       this.batchItems = newBatchItems;
       this.batches = newBatches;
+      this._notify();
 
       // Full server resync only for terminal state changes
       if (batchId && (newState === 'COMPLETED' || newState === 'FAILED')) {
@@ -1107,6 +1131,7 @@ class DownloadStore {
       this.downloads = newDownloads;
       this.batchItems = newBatchItems;
       this.batches = newBatches;
+      this._notify();
     });
 
     // Handle TASK_REMOVED - task deleted
@@ -1124,6 +1149,7 @@ class DownloadStore {
         const newDownloads = new Map(this.downloads);
         newDownloads.delete(message.task_id);
         this.downloads = newDownloads;
+        this._notify();
 
         if (batchId) {
           const newBatchItems = new Map(this.batchItems);
@@ -1147,6 +1173,7 @@ class DownloadStore {
     wsClient.on('ENGINE_STATS', (message) => {
       if (message.stats) {
         this.stats = message.stats;
+        this._notify();
       }
     });
   }
@@ -1154,10 +1181,11 @@ class DownloadStore {
   // ---------------------------------------------------------------------------
   // Svelte 4 store compat: subscribe method
   // Allows $downloadStore auto-subscription in legacy .svelte templates.
-  // Returns the full state snapshot once; reactive updates require $effect in
-  // Svelte 5 or migration to direct property access.
   // ---------------------------------------------------------------------------
   subscribe(fn: (v: DownloadStoreState) => void): () => void {
+    this._subscribers.add(fn);
+    
+    // Initial sync
     fn({
       downloads: this.downloads,
       batches: this.batches,
@@ -1168,7 +1196,10 @@ class DownloadStore {
       loading: this.loading,
       error: this.error,
     });
-    return () => {};
+
+    return () => {
+      this._subscribers.delete(fn);
+    };
   }
 }
 
@@ -1187,8 +1218,10 @@ export const downloadStore = new DownloadStore();
 function makeReadable<T>(getter: () => T) {
   return {
     subscribe(fn: (v: T) => void): () => void {
-      fn(getter());
-      return () => {};
+      // Subscribe to the main store to get updates
+      return downloadStore.subscribe(() => {
+        fn(getter());
+      });
     },
   };
 }

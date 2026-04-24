@@ -29,11 +29,12 @@ impl DuplicateDetector {
     }
     
     /// Find task by Fshare code in task manager
-    pub fn find_task_by_fshare_code(
-        task_manager: &DownloadTaskManager, 
+    pub async fn find_task_by_fshare_code(
+        task_manager: &DownloadTaskManager,
         code: &str
     ) -> Option<DownloadTask> {
         task_manager.get_tasks()
+            .await
             .into_iter()
             .find(|t| t.fshare_code.as_deref() == Some(code))
     }
@@ -77,25 +78,25 @@ impl DuplicateDetector {
                 );
                 
                 // Delete old task
-                task_manager.delete_task(existing.id);
-                
+                task_manager.delete_task(existing.id).await;
+
                 // Delete from database
                 if let Some(db) = db {
                     let _ = db.delete_task(existing.id);
                 }
-                
+
                 // Create new task
                 let mut task = DownloadTask::new(url, filename, host, category);
                 task.fshare_code = Some(code);
                 task.destination = download_dir.join(&task.filename).to_string_lossy().to_string();
-                
+
                 // Parse quality metadata from filename
                 let quality_attrs = FilenameParser::extract_quality_attributes(&task.filename);
                 task.quality = Some(quality_attrs.quality_name());
                 task.resolution = quality_attrs.resolution.clone();
-                
+
                 // Add to manager
-                task_manager.add_task(task.clone());
+                task_manager.add_task(task.clone()).await;
                 
                 // Persist to database
                 if let Some(db) = db {

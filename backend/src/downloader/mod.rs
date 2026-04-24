@@ -17,6 +17,6 @@ pub mod task;
 
 // Re-export commonly used types
 pub use orchestrator::DownloadOrchestrator;
-pub use path_builder::TmdbDownloadMetadata;
+pub use path_builder::{PathBuilder, TmdbDownloadMetadata};
 pub use stats::EngineStats;
 pub use task::{DownloadTask, DownloadState, MediaType};
