@@ -305,12 +305,11 @@ impl Db {
         conn.execute(
             "INSERT OR REPLACE INTO downloads (
                 id, url, original_url, filename, destination, state, progress, size, 
-                downloaded, speed, eta,
-                host, category, priority, segments, retry_count, created_at, 
-                started_at, completed_at, wait_until, error_message, batch_id, batch_name,
-                tmdb_id, tmdb_title, tmdb_season, tmdb_episode, quality, resolution,
-                arr_announced, arr_series_id, arr_movie_id, arr_announce_error,
-                fshare_code
+                downloaded, speed, eta, host, category, priority, segments, retry_count, 
+                created_at, started_at, completed_at, wait_until, error_message, 
+                batch_id, batch_name, tmdb_id, tmdb_title, tmdb_season, tmdb_episode,
+                arr_announced, arr_series_id, arr_movie_id, arr_announce_error, fshare_code,
+                quality, resolution
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34)",
             params![
                 task.id.to_string(),
@@ -340,13 +339,13 @@ impl Db {
                 task.tmdb_title,
                 task.tmdb_season.map(|s| s as i64),
                 task.tmdb_episode.map(|e| e as i64),
-                &task.quality,
-                &task.resolution,
                 task.arr_announced,
                 task.arr_series_id,
                 task.arr_movie_id,
-                None::<String>, // arr_announce_error - keep simple for now
+                task.arr_announce_error,
                 &task.fshare_code,
+                &task.quality,
+                &task.resolution,
             ],
         )?;
         Ok(())
@@ -430,11 +429,11 @@ impl Db {
             arr_series_id: row.get::<_, Option<i64>>(28).ok().flatten(),
             arr_movie_id: row.get::<_, Option<i64>>(29).ok().flatten(),
             arr_announce_error: row.get::<_, Option<String>>(30).ok().flatten(),
+            fshare_code: row.get::<_, Option<String>>(31).ok().flatten(),
             quality: row.get::<_, Option<String>>(32).ok().flatten(),
             resolution: row.get::<_, Option<String>>(33).ok().flatten(),
-            url_metadata: None,  // Not stored in DB yet, will be set on URL resolution
-            error_history: Vec::new(),  // Not stored in DB, will be populated on errors
-            fshare_code: row.get::<_, Option<String>>(31).ok().flatten(),
+            url_metadata: None,
+            error_history: Vec::new(),
             state_obj: crate::downloader::state_machine::TaskStateFactory::get_state(state),
             cancel_token: CancellationToken::new(),
             pause_notify: Arc::new(Notify::new()),
@@ -500,9 +499,11 @@ impl Db {
         // Get paginated tasks (active states first, then by created_at DESC)
         let mut stmt = conn.prepare(
             "SELECT id, url, original_url, filename, destination, state, progress, size, 
-             downloaded, speed, eta,
-             host, category, priority, segments, retry_count, created_at, 
-             started_at, completed_at, wait_until, error_message, batch_id, batch_name 
+             downloaded, speed, eta, host, category, priority, segments, retry_count, 
+             created_at, started_at, completed_at, wait_until, error_message, 
+             batch_id, batch_name, tmdb_id, tmdb_title, tmdb_season, tmdb_episode,
+             arr_announced, arr_series_id, arr_movie_id, arr_announce_error, fshare_code,
+             quality, resolution
              FROM downloads 
              ORDER BY 
                 CASE state 
@@ -1015,6 +1016,21 @@ impl Db {
             let result: Option<String> = conn.query_row(
                 "SELECT batch_id FROM downloads WHERE batch_name = ?1 LIMIT 1",
                 params![&batch_name],
+                |row| row.get(0)
+            ).optional()?;
+            Ok(result)
+        }).await.unwrap()
+    }
+
+    /// Get batch_id for an existing batch by tmdb_id (async)
+    /// Returns the batch_id if an item with this tmdb_id exists in a batch, None otherwise
+    pub async fn get_batch_id_by_tmdb_id_async(&self, tmdb_id: i64) -> Result<Option<String>> {
+        let pool = self.pool.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool.get().map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            let result: Option<String> = conn.query_row(
+                "SELECT batch_id FROM downloads WHERE tmdb_id = ?1 AND batch_id IS NOT NULL LIMIT 1",
+                params![tmdb_id],
                 |row| row.get(0)
             ).optional()?;
             Ok(result)

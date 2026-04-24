@@ -296,6 +296,7 @@ async fn convert_smart_response_to_xml(
     response: axum::response::Response, 
     query: &str, 
     host: &str,
+    apikey: &str,
     tmdb_id: Option<String>,
     media_type: &str,
     season: Option<u32>,
@@ -323,11 +324,12 @@ async fn convert_smart_response_to_xml(
         }
     };
     
-    // Fetch TMDB title for synthesis
-    let tmdb_title = if let Some(ref id) = tmdb_id {
-        fetch_tmdb_title(id, media_type).await
+    // Fetch TMDB title AND year for synthesis — year is needed for Sonarr to disambiguate
+    // series (e.g. "How Dare You!? (2026)"). Without the year Sonarr reports "Unknown Series".
+    let (tmdb_title, tmdb_year) = if let Some(ref id) = tmdb_id {
+        fetch_tmdb_title_and_year(id, media_type).await
     } else {
-        None
+        (None, None)
     };
     
     // Extract all files from quality groups
@@ -340,10 +342,11 @@ async fn convert_smart_response_to_xml(
                 // Determine category based on filename (detects HD/UHD/TV automatically)
                 let category = determine_category(&file.name);
                 
-                // Synthesize title for Sonarr parsing
+                // Synthesize title for Sonarr/Radarr parsing
                 let synthesized_title = synthesize_title(
-                    &file.name,
+                    &file,
                     tmdb_title.as_deref(),
+                    tmdb_year,
                     season,
                     episode,
                 );
@@ -352,7 +355,7 @@ async fn convert_smart_response_to_xml(
                 let result = IndexerResult {
                     title: synthesized_title,
                     guid: format!("fshare://{}", extract_file_id(&file.url)),
-                    link: generate_nzb_url(&file.url, host, &tmdb_id, &Some(media_type.to_string()), &season, &episode), // Point to NZB download endpoint
+                    link: generate_nzb_url(&file.url, host, apikey, &tmdb_id, &Some(media_type.to_string()), &season, &episode),
                     size: file.size,
                     pub_date: Utc::now(),
                     category,
@@ -367,22 +370,27 @@ async fn convert_smart_response_to_xml(
     if let Some(seasons) = smart_response.seasons {
         for season_group in seasons {
             for episode_group in season_group.episodes_grouped {
+                // Use the episode number from the group, not the outer query filter.
+                // The outer `episode` is the Sonarr search filter (e.g. E03 when searching
+                // for a specific episode). When iterating seasons we must use each group's
+                // own episode number so every result gets the correct S##E## tag.
+                let ep_num = Some(episode_group.episode_number);
                 for file in episode_group.files {
-                    // Synthesize title for Sonarr parsing
                     let synthesized_title = synthesize_title(
-                        &file.name,
+                        &file,
                         tmdb_title.as_deref(),
+                        tmdb_year,
                         Some(season_group.season),
-                        episode,
+                        ep_num,
                     );
                     
                     let result = IndexerResult {
                         title: synthesized_title,
                         guid: format!("fshare://{}", extract_file_id(&file.url)),
-                        link: generate_nzb_url(&file.url, host, &tmdb_id, &Some(media_type.to_string()), &Some(season_group.season), &episode), // Point to NZB download endpoint
+                        link: generate_nzb_url(&file.url, host, apikey, &tmdb_id, &Some(media_type.to_string()), &Some(season_group.season), &ep_num),
                         size: file.size,
                         pub_date: Utc::now(),
-                        category: determine_category(&file.name), // Auto-detect HD/UHD
+                        category: determine_category(&file.name),
                     };
                     
                     indexer_results.push(result);
@@ -392,10 +400,11 @@ async fn convert_smart_response_to_xml(
     }
     
     tracing::info!(
-        "Converted SmartSearchResponse: {} results from {} quality groups (TMDB title: {:?})",
+        "Converted SmartSearchResponse: {} results from {} quality groups (TMDB: {:?} {:?})",
         indexer_results.len(),
         group_count,
-        tmdb_title
+        tmdb_title,
+        tmdb_year,
     );
     
     generate_search_xml(indexer_results, query)
@@ -442,9 +451,25 @@ pub async fn fetch_tmdb_title(tmdb_id: &str, media_type: &str) -> Option<String>
         let resp = client.get(&url).send().await.ok()?;
         let data: Value = resp.json().await.ok()?;
         if media_type == "tv" {
-            data["name"].as_str().map(|s| s.to_string())
+            let name = data["name"].as_str().unwrap_or("");
+            let year = data["first_air_date"].as_str()
+                .and_then(|d| d.split('-').next())
+                .unwrap_or("");
+            if !name.is_empty() {
+                // Return bare title only; year is tracked separately via meta.year
+                // to avoid embedding it directly into the string (which causes
+                // "Title Year" vs "Title (Year)" inconsistency in filenames).
+                Some(name.to_string())
+            } else {
+                None
+            }
         } else {
-            data["title"].as_str().map(|s| s.to_string())
+            let title = data["title"].as_str().unwrap_or("");
+            if !title.is_empty() {
+                Some(title.to_string())
+            } else {
+                None
+            }
         }
     }.await;
 
@@ -453,28 +478,136 @@ pub async fn fetch_tmdb_title(tmdb_id: &str, media_type: &str) -> Option<String>
 }
 
 
-/// Synthesize a parseable title for Sonarr
-/// Format: "Series Name - S01E01 - Original Filename" or "Series Name - Original Filename"
+/// Fetch both title and release year from TMDB in a single call.
+///
+/// Returns `(title, year)` where year is `None` when not available.
+/// Shares the same HTTP round-trip budget as `fetch_tmdb_title` using a
+/// dedicated cache keyed on `"year:{media_type}:{tmdb_id}"`.
+pub async fn fetch_tmdb_title_and_year(
+    tmdb_id: &str,
+    media_type: &str,
+) -> (Option<String>, Option<i32>) {
+    use moka::future::Cache;
+    use once_cell::sync::Lazy;
+
+    // Cache stores (title, year_string) — both may be None independently.
+    static PAIR_CACHE: Lazy<Cache<String, (Option<String>, Option<String>)>> =
+        Lazy::new(|| {
+            Cache::builder()
+                .max_capacity(2048)
+                .time_to_live(std::time::Duration::from_secs(86400))
+                .build()
+        });
+
+    let cache_key = format!("pair:{}:{}", media_type, tmdb_id);
+
+    if let Some((cached_title, cached_year_str)) = PAIR_CACHE.get(&cache_key).await {
+        let year = cached_year_str.as_deref().and_then(|y| y.parse::<i32>().ok());
+        return (cached_title, year);
+    }
+
+    let client = Client::new();
+    let endpoint = if media_type == "tv" { "tv" } else { "movie" };
+    let url = format!(
+        "https://api.themoviedb.org/3/{}/{}?api_key={}",
+        endpoint, tmdb_id, TMDB_API_KEY
+    );
+
+    let pair: (Option<String>, Option<String>) = async {
+        let resp = client.get(&url).send().await.ok()?;
+        let data: Value = resp.json().await.ok()?;
+        if media_type == "tv" {
+            let name = data["name"].as_str().unwrap_or("");
+            let year_str = data["first_air_date"].as_str()
+                .and_then(|d| d.split('-').next())
+                .unwrap_or("");
+            let title = if !name.is_empty() { Some(name.to_string()) } else { None };
+            let year  = if !year_str.is_empty() { Some(year_str.to_string()) } else { None };
+            Some((title, year))
+        } else {
+            let name = data["title"].as_str().unwrap_or("");
+            let year_str = data["release_date"].as_str()
+                .and_then(|d| d.split('-').next())
+                .unwrap_or("");
+            let title = if !name.is_empty() { Some(name.to_string()) } else { None };
+            let year  = if !year_str.is_empty() { Some(year_str.to_string()) } else { None };
+            Some((title, year))
+        }
+    }.await
+    .unwrap_or((None, None));
+
+    PAIR_CACHE.insert(cache_key, pair.clone()).await;
+    let year = pair.1.as_deref().and_then(|y| y.parse::<i32>().ok());
+    (pair.0, year)
+}
+
+/// Synthesize a parseable title for Sonarr/Radarr
+/// Format: "Series.Name.2026.S01E01.2160p.WEB-DL.H.265-FShare.mkv"
+///
+/// The year is included between the title and S##E## so Sonarr can
+/// unambiguously match the release to the correct series entry (e.g.
+/// "How Dare You!? (2026)"). Without it Sonarr reports "Unknown Series".
 fn synthesize_title(
-    original_filename: &str,
+    file: &crate::utils::title_matcher::SmartSearchResult,
     tmdb_title: Option<&str>,
+    tmdb_year: Option<i32>,
     season: Option<u32>,
     episode: Option<u32>,
 ) -> String {
-    match (tmdb_title, season, episode) {
-        (Some(title), Some(s), Some(e)) => {
-            // TV show with season/episode: "Series Name - S01E01 - filename"
-            format!("{} - S{:02}E{:02} - {}", title, s, e, original_filename)
-        }
-        (Some(title), _, _) => {
-            // Has TMDB title but no season/episode: "Title - filename"
-            format!("{} - {}", title, original_filename)
-        }
-        _ => {
-            // No TMDB title: use original filename
-            original_filename.to_string()
-        }
+    let mut parts = Vec::new();
+
+    // 1. Clean TMDB title (strip punctuation that confuses scene parsers)
+    if let Some(title) = tmdb_title {
+        let clean_title = title
+            .replace(':', "")
+            .replace('?', "")
+            .replace('!', "")
+            .replace(',', "");
+        parts.push(clean_title.trim().replace(' ', "."));
+    } else {
+        // No TMDB info — fall back to the original filename unchanged
+        return file.name.clone();
     }
+
+    // 2. Release year (critical for Sonarr series disambiguation)
+    if let Some(year) = tmdb_year {
+        parts.push(year.to_string());
+    }
+
+    // 3. Season & Episode
+    if let (Some(s), Some(e)) = (season, episode) {
+        parts.push(format!("S{:02}E{:02}", s, e));
+    }
+
+    // 4. Quality metadata
+    if let Some(res) = &file.quality_attrs.resolution {
+        if !res.is_empty() { parts.push(res.clone()); }
+    }
+    if let Some(src) = &file.quality_attrs.source {
+        if !src.is_empty() { parts.push(src.clone()); }
+    }
+    if file.quality_attrs.hdr {
+        parts.push("HDR".to_string());
+    }
+    if file.quality_attrs.dolby_vision {
+        parts.push("DV".to_string());
+    }
+    if let Some(vc) = &file.quality_attrs.video_codec {
+        if !vc.is_empty() { parts.push(vc.clone()); }
+    }
+    if let Some(ac) = &file.quality_attrs.audio_codec {
+        if !ac.is_empty() { parts.push(ac.clone()); }
+    }
+    
+    // 5. Release group tag
+    parts.push("-FShare".to_string());
+
+    let ext = std::path::Path::new(&file.name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("mkv");
+
+    format!("{}.{}", parts.join("."), ext)
 }
 
 /// Extract file ID from Fshare URL
@@ -490,6 +623,7 @@ fn extract_file_id(url: &str) -> String {
 fn generate_nzb_url(
     fshare_url: &str, 
     host: &str,
+    apikey: &str,
     tmdb_id: &Option<String>,
     media_type: &Option<String>,
     season: &Option<u32>,
@@ -497,6 +631,9 @@ fn generate_nzb_url(
 ) -> String {
     let file_id = extract_file_id(fshare_url);
     let mut url = format!("http://{}/newznab/api/download?fcode={}", host, file_id);
+    
+    // Auth for download endpoint
+    url.push_str(&format!("&apikey={}", apikey));
     
     // Add TMDB metadata as query parameters
     if let Some(id) = tmdb_id {
@@ -549,6 +686,8 @@ async fn handle_tv_search(
     params: IndexerParams,
     host: &str,
 ) -> String {
+    let apikey = params.apikey.clone();
+    
     // Step 1: Convert TVDB ID to TMDB ID if provided
     let tmdb_id = if let Some(tvdb_id) = params.tvdbid {
         match tvdb_to_tmdb(&tvdb_id).await {
@@ -602,6 +741,7 @@ async fn handle_tv_search(
         response, 
         &title, 
         host,
+        &apikey,
         tmdb_id_str,
         "tv",
         season_num,
@@ -615,6 +755,8 @@ async fn handle_movie_search(
     params: IndexerParams,
     host: &str,
 ) -> String {
+    let apikey = params.apikey.clone();
+    
     // Step 1: Convert IMDB ID to TMDB ID if provided
     let tmdb_id = if let Some(imdb_id) = params.imdbid {
         match imdb_to_tmdb(&imdb_id).await {
@@ -668,6 +810,7 @@ async fn handle_movie_search(
         response, 
         &title, 
         host,
+        &apikey,
         tmdb_id_str,
         "movie",
         None, // Movies don't have season

@@ -73,9 +73,13 @@ impl PathBuilder {
                     }
                 }
                 "tv" => {
-                    // Build: SeriesName/Season XX/filename
+                    // Build: SeriesName (Year)/Season XX/filename
                     let series_folder = if let Some(ref title) = meta.title {
-                        Self::sanitize_filename(title)
+                        if let Some(year) = meta.year {
+                            format!("{} ({})", Self::sanitize_filename(title), year)
+                        } else {
+                            Self::sanitize_filename(title)
+                        }
                     } else {
                         "Unknown Series".to_string()
                     };

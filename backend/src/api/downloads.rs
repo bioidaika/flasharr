@@ -232,9 +232,9 @@ async fn list_downloads(
     // Get status counts from database for filter dropdown
     let db_status_counts = state.db.get_status_counts_async().await.unwrap_or_default();
     let status_counts = StatusCounts::from_db_counts(db_status_counts);
-    
+
     // Merge real-time progress from active downloads in memory
-    let active_tasks = state.download_orchestrator.task_manager().get_active_tasks();
+    let active_tasks = state.download_orchestrator.task_manager().get_active_tasks().await;
     for download in downloads.iter_mut() {
         if let Some(active) = active_tasks.iter().find(|t| t.id == download.id) {
             // Update with real-time data from memory
@@ -245,8 +245,8 @@ async fn list_downloads(
             download.state = active.state;
         }
     }
-    
-    let stats = state.download_orchestrator.task_manager().get_stats();
+
+    let stats = state.download_orchestrator.task_manager().get_stats().await;
     let total_pages = ((total as f64) / (limit as f64)).ceil() as u32;
     
     Json(DownloadsResponse { 
@@ -266,9 +266,10 @@ async fn get_download(
     Path(id): Path<String>,
 ) -> Result<Json<DownloadTask>, StatusCode> {
     let uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    
+
     state.download_orchestrator.task_manager()
         .get_task(uuid)
+        .await
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
 }
@@ -291,16 +292,23 @@ async fn add_download(
     }
     
     // Category from payload or derive from TMDB metadata
-    let category = payload.category.unwrap_or_else(|| {
-        if let Some(ref tmdb) = payload.tmdb {
-            match tmdb.media_type.as_deref() {
-                Some("movie") => "movies".to_string(),
-                Some("tv") => "tv".to_string(),
-                Some(other) => other.to_string(),
-                None => "other".to_string(),
-            }
+    // CRITICAL: Trust TMDB media_type over UI's provided category if they mismatch
+    let category = if let Some(ref tmdb) = payload.tmdb {
+        match tmdb.media_type.as_deref() {
+            Some("movie") => "movies".to_string(), // Force to movies if TMDB says so
+            Some("tv") => "tv".to_string(),      // Force to tv if TMDB says so
+            _ => payload.category.unwrap_or_else(|| "other".to_string()),
+        }
+    } else {
+        payload.category.unwrap_or_else(|| "other".to_string())
+    };
+    
+    // Normalize filename (strip leading slash) at the API entry point
+    let final_filename_api = payload.filename.map(|f| {
+        if f.starts_with('/') {
+            f.trim_start_matches('/').to_string()
         } else {
-            "other".to_string()
+            f
         }
     });
     
@@ -315,18 +323,26 @@ async fn add_download(
         episode: t.episode,
     });
     
-    // Smart Grab Batch Consolidation: Always check for existing batch by name
+    // Smart Grab Batch Consolidation: Always check for existing batch by name or TMDB ID
     let (batch_id, batch_name) = if let (Some(provided_batch_id), Some(provided_batch_name)) = 
         (&payload.batch_id, &payload.batch_name) {
         
-        // Frontend provided batch info - check if we should consolidate with existing batch
-        let existing_batch_id = state.db
+        // Strategy 1: Check if a batch with this NAME already exists
+        let existing_id_by_name = state.db
             .get_batch_id_by_name_async(provided_batch_name)
             .await
             .ok()
             .flatten();
         
-        if let Some(existing_id) = existing_batch_id {
+        // Strategy 2: If TMDB ID is available, check if we already have a batch for this show
+        let existing_id_by_tmdb = if let Some(ref meta) = tmdb_metadata {
+            if let Some(tmdb_id) = meta.tmdb_id {
+                state.db.get_batch_id_by_tmdb_id_async(tmdb_id).await.ok().flatten()
+            } else { None }
+        } else { None };
+        
+        // Consolidate: Preference to name match, then TMDB match
+        if let Some(existing_id) = existing_id_by_name.or(existing_id_by_tmdb) {
             tracing::info!("Consolidating into existing batch: {} ({})", provided_batch_name, existing_id);
             (Some(existing_id), Some(provided_batch_name.clone()))
         } else {
@@ -334,26 +350,23 @@ async fn add_download(
             (Some(provided_batch_id.clone()), Some(provided_batch_name.clone()))
         }
     } else if let Some(ref meta) = tmdb_metadata {
-        // No batch info provided - auto-generate for TV shows
-        if meta.media_type.as_deref() == Some("tv") && meta.season.is_some() {
-            let auto_batch_name = format!(
-                "{} S{:02}",
-                meta.title.as_deref().unwrap_or("Unknown Show"),
-                meta.season.unwrap()
-            );
+        // No batch info provided - auto-generate for TV episodes belonging to a series
+        if meta.media_type.as_deref() == Some("tv") {
+            let auto_batch_name = meta.title.clone().unwrap_or_else(|| "Unknown Show".to_string());
             
-            let existing_batch_id = state.db
-                .get_batch_id_by_name_async(&auto_batch_name)
-                .await
-                .ok()
-                .flatten();
+            // Try to find existing batch for this TMDB ID first (most reliable for TV series)
+            let existing_id = if let Some(tmdb_id) = meta.tmdb_id {
+                state.db.get_batch_id_by_tmdb_id_async(tmdb_id).await.ok().flatten()
+            } else {
+                state.db.get_batch_id_by_name_async(&auto_batch_name).await.ok().flatten()
+            };
             
-            let auto_batch_id = if let Some(existing_id) = existing_batch_id {
-                tracing::info!("Reusing existing batch: {} ({})", auto_batch_name, existing_id);
-                existing_id
+            let auto_batch_id = if let Some(id) = existing_id {
+                tracing::info!("Reusing existing series batch: {} ({})", auto_batch_name, id);
+                id
             } else {
                 let new_id = uuid::Uuid::new_v4().to_string();
-                tracing::info!("Creating new batch: {} ({})", auto_batch_name, new_id);
+                tracing::info!("Creating new series batch: {} ({})", auto_batch_name, new_id);
                 new_id
             };
             
@@ -367,7 +380,7 @@ async fn add_download(
     
     let task = match state.download_orchestrator.add_download_with_metadata(
         payload.url,
-        payload.filename,
+        final_filename_api,
         "fshare".to_string(),
         category,
         tmdb_metadata,
@@ -396,10 +409,10 @@ async fn delete_download(
     Path(id): Path<String>,
 ) -> Result<Json<ActionResponse>, StatusCode> {
     let uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    
+
     // Delete from in-memory task manager (may not exist if task is queued/failed)
-    let in_memory = state.download_orchestrator.task_manager().delete_task(uuid);
-    
+    let in_memory = state.download_orchestrator.task_manager().delete_task(uuid).await;
+
     // Always try to delete from database (task might exist in DB but not in memory)
     let from_db = match state.db.delete_task(uuid) {
         Ok(_) => {
@@ -411,7 +424,7 @@ async fn delete_download(
             false
         }
     };
-    
+
     let success = in_memory || from_db;
     
     // Broadcast TASK_REMOVED to frontend if deleted from either location
@@ -431,21 +444,21 @@ async fn pause_download(
     Path(id): Path<String>,
 ) -> Result<Json<ActionResponse>, StatusCode> {
     let uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    let task_result = state.download_orchestrator.task_manager().pause_task(uuid);
+
+    let task_result = state.download_orchestrator.task_manager().pause_task(uuid).await;
     let success = task_result.is_some();
-    
+
     // Broadcast state change if successful
     if let Some(task) = task_result {
         state.download_orchestrator.broadcast_task_update(&task);
     }
-    
+
     Ok(Json(ActionResponse {
         success,
-        message: if !success { 
-            Some("Task not found or cannot be paused".to_string()) 
-        } else { 
-            None 
+        message: if !success {
+            Some("Task not found or cannot be paused".to_string())
+        } else {
+            None
         },
     }))
 }
@@ -456,23 +469,23 @@ async fn resume_download(
     Path(id): Path<String>,
 ) -> Result<Json<ActionResponse>, StatusCode> {
     let uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    
-    let task_result = state.download_orchestrator.task_manager().resume_task(uuid);
+
+    let task_result = state.download_orchestrator.task_manager().resume_task(uuid).await;
     let success = task_result.is_some();
-    
+
     // Broadcast state change if successful
     if let Some(task) = task_result {
         state.download_orchestrator.broadcast_task_update(&task);
         // Wake idle workers to process the resumed task
         state.download_orchestrator.wake_workers();
     }
-    
+
     Ok(Json(ActionResponse {
         success,
-        message: if !success { 
-            Some("Task not found or not paused".to_string()) 
-        } else { 
-            None 
+        message: if !success {
+            Some("Task not found or not paused".to_string())
+        } else {
+            None
         },
     }))
 }
@@ -483,22 +496,22 @@ async fn retry_download(
     Path(id): Path<String>,
 ) -> Result<Json<ActionResponse>, StatusCode> {
     let uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    
+
     // For retry, we handle failed/cancelled tasks
-    let task_result = state.download_orchestrator.task_manager().retry_task(uuid);
+    let task_result = state.download_orchestrator.task_manager().retry_task(uuid).await;
     let success = task_result.is_some();
-    
+
     // Wake idle workers to process the retried task
     if success {
         state.download_orchestrator.wake_workers();
     }
-    
+
     Ok(Json(ActionResponse {
         success,
-        message: if !success { 
-            Some("Task not found or cannot be retried".to_string()) 
-        } else { 
-            None 
+        message: if !success {
+            Some("Task not found or cannot be retried".to_string())
+        } else {
+            None
         },
     }))
 }
@@ -555,7 +568,7 @@ async fn resume_all(
 async fn get_stats(
     State(state): State<Arc<AppState>>,
 ) -> Json<EngineStats> {
-    Json(state.download_orchestrator.task_manager().get_stats())
+    Json(state.download_orchestrator.task_manager().get_stats().await)
 }
 
 // ============================================================================
@@ -647,8 +660,8 @@ async fn get_batch_progress(
     State(state): State<Arc<AppState>>,
     Path(batch_id): Path<String>,
 ) -> Result<Json<BatchProgress>, StatusCode> {
-    let all_tasks = state.download_orchestrator.task_manager().get_tasks();
-    
+    let all_tasks = state.download_orchestrator.task_manager().get_tasks().await;
+
     // Filter tasks by batch_id
     let batch_tasks: Vec<_> = all_tasks.iter()
         .filter(|t| t.batch_id.as_deref() == Some(&batch_id))
@@ -735,7 +748,7 @@ async fn list_batch_summaries(
         });
     
     // Merge real-time progress from active downloads for standalone items
-    let active_tasks = state.download_orchestrator.task_manager().get_active_tasks();
+    let active_tasks = state.download_orchestrator.task_manager().get_active_tasks().await;
     let mut standalone_with_realtime = standalone;
     for download in standalone_with_realtime.iter_mut() {
         if let Some(active) = active_tasks.iter().find(|t| t.id == download.id) {
@@ -794,11 +807,11 @@ async fn list_batch_summaries(
     // Get status counts from database
     let db_status_counts = state.db.get_status_counts_async().await.unwrap_or_default();
     let status_counts = StatusCounts::from_db_counts(db_status_counts);
-    
-    let stats = state.download_orchestrator.task_manager().get_stats();
+
+    let stats = state.download_orchestrator.task_manager().get_stats().await;
     let total = total_batches + total_standalone;
     let total_pages = ((total as f64) / (limit as f64)).ceil() as u32;
-    
+
     Json(BatchSummariesResponse {
         batches: batches_with_realtime,
         standalone: standalone_with_realtime,
@@ -831,7 +844,7 @@ async fn get_batch_items(
     }
     
     // Merge real-time progress from active downloads
-    let active_tasks = state.download_orchestrator.task_manager().get_active_tasks();
+    let active_tasks = state.download_orchestrator.task_manager().get_active_tasks().await;
     let mut tasks_with_realtime = tasks;
     for task in tasks_with_realtime.iter_mut() {
         if let Some(active) = active_tasks.iter().find(|t| t.id == task.id) {

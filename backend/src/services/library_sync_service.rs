@@ -191,11 +191,71 @@ impl LibrarySyncService {
         
         info!("[RECONCILE] Auditing {} completed downloads", completed.len());
         
-        for download in completed {
+        for mut download in completed {
+            let mut changed = false;
+
+            // 1. Normalize filename (strip leading slash)
+            if download.filename.starts_with('/') {
+                info!("[RECONCILE] Normalizing filename for {}: {} -> {}", 
+                    download.id, download.filename, download.filename.trim_start_matches('/'));
+                download.filename = download.filename.trim_start_matches('/').to_string();
+                changed = true;
+            }
+
+            // 2. Fix corrupted destination paths (e.g. movies with "Season X" or missing subfolders)
+            // Re-detect media type to ensure we have the truth
+            let media_type = download.detect_media_type();
+            let expected_type_str = match media_type {
+                MediaType::Movie => "movie",
+                _ => "tv"
+            };
+
+            // If category is "movie" but path has "Season", or vice versa, it's corrupted
+            let has_season_folder = download.destination.contains("/Season ") || download.destination.contains("/season ");
+            let is_movie = expected_type_str == "movie";
+            
+            if (is_movie && has_season_folder) || (!is_movie && !has_season_folder && download.tmdb_season.is_some()) {
+                warn!("[RECONCILE] Detected corrupted path for {} {}: {}", 
+                    expected_type_str, download.id, download.destination);
+                
+                // Rebuild metadata for path builder
+                let tmdb_meta = Some(crate::downloader::TmdbDownloadMetadata {
+                    tmdb_id: download.tmdb_id,
+                    media_type: Some(expected_type_str.to_string()),
+                    title: download.tmdb_title.clone(),
+                    year: None, // We'll rely on the title for now or fetch if needed
+                    collection_name: None,
+                    season: download.tmdb_season.map(|s| s as i32),
+                    episode: download.tmdb_episode.map(|e| e as i32),
+                });
+                
+                let root_dir = Path::new("/data/media").join(if is_movie { "movies" } else { "tv" });
+                let new_dest = crate::downloader::PathBuilder::build_destination_path(
+                    &download.filename,
+                    expected_type_str,
+                    &tmdb_meta,
+                    &root_dir
+                );
+                
+                if new_dest != download.destination {
+                    info!("[RECONCILE] Reconstructed path for {}: {} -> {}", download.id, download.destination, new_dest);
+                    download.destination = new_dest;
+                    changed = true;
+                }
+            }
+
+            // Save changes to DB if any
+            if changed {
+                if let Err(e) = self.db.save_task(&download) {
+                    error!("[RECONCILE] Failed to update task {} in DB: {}", download.id, e);
+                }
+            }
+
             let destination = Path::new(&download.destination);
             
-            // Check if file is already at destination
+            // 3. Physical file reconciliation
             if destination.exists() {
+                // ... (rest of the existing symlink logic)
                 // If it's a symlink, we want to convert it to a real file (MOVE) to avoid fragmentation
                 if let Ok(metadata) = tokio::fs::symlink_metadata(destination).await {
                     if metadata.file_type().is_symlink() {

@@ -215,7 +215,7 @@ impl DownloadOrchestrator {
         
         // Check for duplicates in memory first (fast path)
         if let Some(code) = &fshare_code {
-            if let Some(existing) = self.find_task_by_fshare_code(code) {
+            if let Some(existing) = self.find_task_by_fshare_code(code).await {
                 let filename = filename_override.unwrap_or_else(|| "unknown".to_string());
                 return self.handle_duplicate(existing, url, filename, host, category, code.clone()).await;
             }
@@ -264,7 +264,7 @@ impl DownloadOrchestrator {
         }
         
         // Fetch real filename and size from Fshare API
-        let (filename, file_size) = if let Some(handler) = self.host_registry.get_handler(&host) {
+        let (mut filename, file_size) = if let Some(handler) = self.host_registry.get_handler(&host) {
             match handler.get_file_info(&url).await {
                 Ok(file_info) => {
                     tracing::info!("Fetched file info from API: name='{}', size={}", file_info.filename, file_info.size);
@@ -282,6 +282,11 @@ impl DownloadOrchestrator {
             let final_name = filename_override.unwrap_or_else(|| url.split('/').last().unwrap_or("unknown").to_string());
             (final_name, 0u64)
         };
+
+        // Trim leading slash to prevent Path::join from treating it as an absolute path
+        if filename.starts_with('/') {
+            filename = filename.trim_start_matches('/').to_string();
+        }
         
         // Build destination path based on TMDB metadata
         let download_dir = {
@@ -316,9 +321,13 @@ impl DownloadOrchestrator {
                     meta.title.clone()
                 };
                 
-                // Create clean filename: "Series - S##E##.ext"
+                // Create clean filename: "Series (Year) - S##E##.ext"
                 if let Some(title_str) = title {
-                    let clean_filename = format!("{} - S{:02}E{:02}.{}", title_str, season, episode, extension);
+                    let clean_filename = if let Some(year) = meta.year {
+                        format!("{} ({}) - S{:02}E{:02}.{}", title_str, year, season, episode, extension)
+                    } else {
+                        format!("{} - S{:02}E{:02}.{}", title_str, season, episode, extension)
+                    };
                     tracing::info!("Generated clean filename: {} (from: {})", clean_filename, filename);
                     
                     // Update tmdb_metadata with fetched title for folder organization
@@ -375,12 +384,11 @@ impl DownloadOrchestrator {
         if let Some(ref meta) = tmdb_metadata {
             task.tmdb_id = meta.tmdb_id;
             
-            // Set tmdb_title to "Episode X" for TV episodes, otherwise use series/movie title
-            if let (Some(_), Some(ep)) = (meta.season, meta.episode) {
-                task.tmdb_title = Some(format!("Episode {}", ep));
-            } else {
-                task.tmdb_title = meta.title.clone();
-            }
+            // Always store the series/movie title in tmdb_title — it is the key used by
+            // sabnzbd.rs to report a parseable name to Sonarr (e.g. "How.Dare.You.S01E03.WEB-DL.Flasharr").
+            // Season/episode numbers are tracked separately in tmdb_season/tmdb_episode.
+            // Setting this to "Episode X" caused "Series title mismatch" import failures.
+            task.tmdb_title = meta.title.clone();
             
             task.tmdb_season = meta.season.map(|s| s as u32);
             task.tmdb_episode = meta.episode.map(|e| e as u32);
@@ -429,8 +437,8 @@ impl DownloadOrchestrator {
         }
         
         // Add to manager (SSOT)
-        self.task_manager.add_task(task.clone());
-        
+        self.task_manager.add_task(task.clone()).await;
+
         // Wake idle workers
         self.task_notify.notify_waiters();
         
@@ -515,14 +523,14 @@ impl DownloadOrchestrator {
                                         
                                         // Update in-memory tasks with arr_series_id/arr_movie_id
                                         if let Some(tmdb_id) = task_clone.tmdb_id {
-                                            let all_tasks = task_manager_clone.get_tasks();
+                                            let all_tasks = task_manager_clone.get_tasks().await;
                                             let mut updated_count = 0;
-                                            
+
                                             for mut task in all_tasks {
                                                 if task.tmdb_id == Some(tmdb_id) {
                                                     // Update appropriate ID based on media type
                                                     match task.detect_media_type() {
-                                                        crate::downloader::MediaType::TvSeries | 
+                                                        crate::downloader::MediaType::TvSeries |
                                                         crate::downloader::MediaType::TvEpisode => {
                                                             task.arr_series_id = Some(arr_id as i64);
                                                         }
@@ -530,7 +538,7 @@ impl DownloadOrchestrator {
                                                             task.arr_movie_id = Some(arr_id as i64);
                                                         }
                                                     }
-                                                    task_manager_clone.update_task(task);
+                                                    task_manager_clone.update_task(task).await;
                                                     updated_count += 1;
                                                 }
                                             }
@@ -611,8 +619,8 @@ impl DownloadOrchestrator {
     
     /// Find task by Fshare code
     /// Delegates to DuplicateDetector module
-    fn find_task_by_fshare_code(&self, code: &str) -> Option<DownloadTask> {
-        DuplicateDetector::find_task_by_fshare_code(&self.task_manager, code)
+    async fn find_task_by_fshare_code(&self, code: &str) -> Option<DownloadTask> {
+        DuplicateDetector::find_task_by_fshare_code(&self.task_manager, code).await
     }
     
     /// Handle duplicate download based on existing task state
@@ -650,8 +658,8 @@ impl DownloadOrchestrator {
                 );
                 
                 // Delete old task (this will also delete the file)
-                self.task_manager.delete_task(existing.id);
-                
+                self.task_manager.delete_task(existing.id).await;
+
                 // Delete from database
                 if let Some(db) = &self.db {
                     let _ = db.delete_task(existing.id);
@@ -669,8 +677,8 @@ impl DownloadOrchestrator {
                 task.resolution = quality_attrs.resolution.clone();
                 
                 // Add to manager
-                self.task_manager.add_task(task.clone());
-                
+                self.task_manager.add_task(task.clone()).await;
+
                 // Persist to database
                 if let Some(db) = &self.db {
                     db.save_task(&task)?;
@@ -725,7 +733,7 @@ impl DownloadOrchestrator {
             }
         } else {
             // Fallback to in-memory tasks
-            self.task_manager.get_tasks().into_iter()
+            self.task_manager.get_tasks().await.into_iter()
                 .filter(|t| t.state == DownloadState::Completed)
                 .collect()
         };
@@ -759,7 +767,7 @@ impl DownloadOrchestrator {
             match Self::move_to_arr_path(task, &self.arr_client).await {
                 Some(updated_task) => {
                     // Update in task manager and DB
-                    self.task_manager.update_task(updated_task.clone());
+                    self.task_manager.update_task(updated_task.clone()).await;
                     if let Some(db) = &self.db {
                         let _ = db.save_task(&updated_task);
                     }
@@ -778,25 +786,25 @@ impl DownloadOrchestrator {
 
     /// Get aggregate engine statistics (with database counts for filter dropdown)
     pub async fn get_stats(&self) -> EngineStats {
-        let mut stats = self.task_manager.get_stats();
-        
+        let mut stats = self.task_manager.get_stats().await;
+
         // Query database for accurate status counts (for filter dropdown)
         if let Some(db) = &self.db {
             match db.get_status_counts() {
                 Ok(counts) => {
                     use crate::downloader::stats::DbStatusCounts;
-                    
+
                     // Aggregate counts by UI category
-                    let downloading = *counts.get("DOWNLOADING").unwrap_or(&0) 
+                    let downloading = *counts.get("DOWNLOADING").unwrap_or(&0)
                         + *counts.get("STARTING").unwrap_or(&0);
-                    let queued = *counts.get("QUEUED").unwrap_or(&0) 
+                    let queued = *counts.get("QUEUED").unwrap_or(&0)
                         + *counts.get("WAITING").unwrap_or(&0);
                     let paused = *counts.get("PAUSED").unwrap_or(&0);
                     let completed = *counts.get("COMPLETED").unwrap_or(&0);
                     let failed = *counts.get("FAILED").unwrap_or(&0);
                     let cancelled = *counts.get("CANCELLED").unwrap_or(&0);
                     let all: usize = counts.values().sum();
-                    
+
                     stats.db_counts = Some(DbStatusCounts {
                         all,
                         downloading,
@@ -812,7 +820,7 @@ impl DownloadOrchestrator {
                 }
             }
         }
-        
+
         stats
     }
     
@@ -892,7 +900,7 @@ impl DownloadOrchestrator {
     /// but not in the active TaskManager (e.g., completed tasks, tasks from before restart).
     pub async fn get_task_unified(&self, task_id: uuid::Uuid) -> Option<DownloadTask> {
         // Fast path: check memory first
-        if let Some(task) = self.task_manager.get_task(task_id) {
+        if let Some(task) = self.task_manager.get_task(task_id).await {
             tracing::trace!("Task {} found in TaskManager (cache hit)", task_id);
             return Some(task);
         }
@@ -936,9 +944,9 @@ impl DownloadOrchestrator {
         
         match db.get_tasks_by_states_async(states).await {
             Ok(tasks) => {
-                let count = self.task_manager.restore_tasks(tasks);
+                let count = self.task_manager.restore_tasks(tasks).await;
                 tracing::info!("Loaded {} pending tasks from database into TaskManager", count);
-                
+
                 // Wake workers to process any queued tasks
                 if count > 0 {
                     self.wake_workers();
@@ -1063,13 +1071,13 @@ impl DownloadOrchestrator {
         // 3. Update TaskManager and broadcast for each task
         for task in tasks {
             // Try to pause in TaskManager (for active downloads)
-            if let Some(paused_task) = self.task_manager.pause_task(task.id) {
+            if let Some(paused_task) = self.task_manager.pause_task(task.id).await {
                 self.broadcast_task_update(&paused_task);
             } else {
                 // Task was only in DB (queued), add to TaskManager and broadcast
                 let mut paused = task.clone();
                 paused.state = DownloadState::Paused;
-                self.task_manager.add_task(paused.clone());
+                self.task_manager.add_task(paused.clone()).await;
                 self.broadcast_task_update(&paused);
             }
         }
@@ -1119,10 +1127,10 @@ impl DownloadOrchestrator {
         for task in tasks {
             let mut queued_task = task.clone();
             queued_task.state = DownloadState::Queued;
-            
+
             // Add to TaskManager so workers can pick it up
-            self.task_manager.add_task(queued_task.clone());
-            
+            self.task_manager.add_task(queued_task.clone()).await;
+
             // Broadcast the state change
             self.broadcast_task_update(&queued_task);
         }
@@ -1175,7 +1183,7 @@ impl DownloadOrchestrator {
         task.cancel_token = tokio_util::sync::CancellationToken::new();
 
         // 3. Update memory and DB
-        self.task_manager.add_task(task.clone());
+        self.task_manager.add_task(task.clone()).await;
         if let Some(db) = &self.db {
             db.save_task(&task)?;
         }
@@ -1238,7 +1246,7 @@ impl DownloadOrchestrator {
                 }
                 
                 // Get next queued task
-                if let Some(task) = task_manager.pop_next_queued() {
+                if let Some(task) = task_manager.pop_next_queued().await {
                     tracing::info!("Worker {}: Processing task {}", worker_id, task.id);
                     
                     // Acquire locks for current config and engine
@@ -1291,7 +1299,7 @@ impl DownloadOrchestrator {
         // Update state to Starting
         task.state = DownloadState::Starting;
         task.started_at = Some(Utc::now());
-        task_manager.update_task(task.clone());
+        task_manager.update_task(task.clone()).await;
         
         // Publish StateChanged event (QUEUED -> STARTING)
         event_bus.publish(super::events::TaskEvent::StateChanged {
@@ -1316,12 +1324,12 @@ impl DownloadOrchestrator {
                             resolved_at: Utc::now(),
                             expires_at: Utc::now() + chrono::Duration::hours(6),
                         });
-                        task_manager.update_task(task.clone());
+                        task_manager.update_task(task.clone()).await;
                         resolved.direct_url
                     }
                     Err(e) => {
                         tracing::error!("Worker {}: Failed to resolve URL: {}", worker_id, e);
-                        task_manager.mark_failed(task.id, format!("URL resolution failed: {}", e));
+                        task_manager.mark_failed(task.id, format!("URL resolution failed: {}", e)).await;
                         
                         // Broadcast FAILED state to WebSocket
                         let _ = progress_tx.send(ProgressUpdate {
@@ -1336,7 +1344,7 @@ impl DownloadOrchestrator {
                         });
                         
                         if let Some(db) = db {
-                            if let Some(failed_task) = task_manager.get_task(task.id) {
+                            if let Some(failed_task) = task_manager.get_task(task.id).await {
                                 let _ = db.save_task(&failed_task);
                             }
                         }
@@ -1352,8 +1360,8 @@ impl DownloadOrchestrator {
         
         // Update state to Downloading
         task.state = DownloadState::Downloading;
-        task_manager.update_task(task.clone());
-        
+        task_manager.update_task(task.clone()).await;
+
         // Download the file
         let destination = PathBuf::from(&task.destination);
         let task_id = task.id;
@@ -1368,15 +1376,18 @@ impl DownloadOrchestrator {
             &destination,
             move |progress| {
                 // Update ALL progress fields in one atomic operation to prevent flickering
-                task_manager_clone.update_task_progress(
-                    task_id,
-                    progress.downloaded_bytes,
-                    progress.total_bytes,
-                    progress.speed_bytes_per_sec,
-                    progress.eta_seconds,
-                    progress.percentage as f32,
-                );
-                
+                let task_manager = task_manager_clone.clone();
+                tokio::spawn(async move {
+                    task_manager.update_task_progress(
+                        task_id,
+                        progress.downloaded_bytes,
+                        progress.total_bytes,
+                        progress.speed_bytes_per_sec,
+                        progress.eta_seconds,
+                        progress.percentage as f32,
+                    ).await;
+                });
+
                 // Broadcast progress (WebSocket handler will just read the task, not update again)
                 let _ = progress_tx_clone.send(ProgressUpdate {
                     event: TaskEvent::Updated,
@@ -1396,11 +1407,11 @@ impl DownloadOrchestrator {
         match result {
             Ok(()) => {
                 tracing::info!("Worker {}: Download completed for {}", worker_id, task_id);
-                task_manager.mark_completed(task_id);
+                task_manager.mark_completed(task_id).await;
                 
                 // Post-completion: Move file to Sonarr/Radarr's series/movie folder
                 // This allows Sonarr/Radarr's disk scan to detect and import the file
-                if let Some(completed_task) = task_manager.get_task(task_id) {
+                if let Some(completed_task) = task_manager.get_task(task_id).await {
                     let moved_task = Self::move_to_arr_path(
                         &completed_task,
                         arr_client,
@@ -1408,7 +1419,7 @@ impl DownloadOrchestrator {
                     
                     // Update task with new destination if file was moved
                     if let Some(updated_task) = moved_task {
-                        task_manager.update_task(updated_task.clone());
+                        task_manager.update_task(updated_task.clone()).await;
                         if let Some(db) = db {
                             let _ = db.save_task(&updated_task);
                         }
@@ -1434,7 +1445,7 @@ impl DownloadOrchestrator {
                 
                 // Check if this was a pause action (task state is already Paused)
                 // In this case, we should NOT retry or mark as failed
-                if let Some(task) = task_manager.get_task(task_id) {
+                if let Some(task) = task_manager.get_task(task_id).await {
                     if task.state == DownloadState::Paused {
                         tracing::info!("Worker {}: Download paused for {} (by user request)", worker_id, task_id);
                         
@@ -1461,14 +1472,14 @@ impl DownloadOrchestrator {
                 // Check if user cancelled (not paused)
                 if cancel_token.is_cancelled() {
                     // Check one more time if it was paused
-                    if let Some(task) = task_manager.get_task(task_id) {
+                    if let Some(task) = task_manager.get_task(task_id).await {
                         if task.state == DownloadState::Paused {
                             return; // Already handled above
                         }
                     }
                     
                     // True cancellation (delete/stop), not pause
-                    task_manager.mark_failed(task_id, "Download cancelled".to_string());
+                    task_manager.mark_failed(task_id, "Download cancelled".to_string()).await;
                     
                     let _ = progress_tx.send(ProgressUpdate {
                         event: TaskEvent::Updated,
@@ -1482,13 +1493,13 @@ impl DownloadOrchestrator {
                     });
                     
                     if let Some(db) = db {
-                        if let Some(updated_task) = task_manager.get_task(task_id) {
+                        if let Some(updated_task) = task_manager.get_task(task_id).await {
                             let _ = db.save_task(&updated_task);
                         }
                     }
                     return;
                 }
-                
+
                 // ── Intelligent error classification ──────────────────────────
                 // Use ErrorClassifier to determine the correct recovery strategy
                 // instead of blindly retrying everything with the same config.
@@ -1500,7 +1511,7 @@ impl DownloadOrchestrator {
                     worker_id, task_id, category, error_string
                 );
                 
-                if let Some(mut task) = task_manager.get_task(task_id) {
+                if let Some(mut task) = task_manager.get_task(task_id).await {
                     match category {
                         // ── URL expired: refresh the VIP link and try again ──
                         ErrorCategory::UrlRefreshNeeded { max_retries, reason } => {
@@ -1517,7 +1528,7 @@ impl DownloadOrchestrator {
                                     "Link expired ({}/{}): {reason} — getting fresh URL",
                                     task.retry_count, max_retries
                                 ));
-                                task_manager.update_task(task.clone());
+                                task_manager.update_task(task.clone()).await;
                                 tracing::info!(
                                     "Worker {}: URL refresh needed for {} — will re-resolve in 3s (attempt {}/{})",
                                     worker_id, task_id, task.retry_count, max_retries
@@ -1543,7 +1554,7 @@ impl DownloadOrchestrator {
                                 task.error_message = Some(format!(
                                     "Retry {}/{}: {reason}", task.retry_count, max_retries
                                 ));
-                                task_manager.update_task(task.clone());
+                                task_manager.update_task(task.clone()).await;
                                 tracing::warn!(
                                     "Worker {}: Retryable error for {} in {}ms (attempt {}/{}): {}",
                                     worker_id, task_id, delay_ms, task.retry_count, max_retries, reason
@@ -1578,7 +1589,7 @@ impl DownloadOrchestrator {
                                     "System issue ({}/{}): {reason} — Tip: {fix_suggestion}",
                                     task.retry_count, max_retries
                                 ));
-                                task_manager.update_task(task.clone());
+                                task_manager.update_task(task.clone()).await;
                                 tracing::warn!(
                                     "Worker {}: System issue for {} (attempt {}/{}): {} — {}",
                                     worker_id, task_id, task.retry_count, max_retries, reason, fix_suggestion
@@ -1591,7 +1602,7 @@ impl DownloadOrchestrator {
                     }
                     
                     if let Some(db) = db {
-                        if let Some(updated_task) = task_manager.get_task(task_id) {
+                        if let Some(updated_task) = task_manager.get_task(task_id).await {
                             let _ = db.save_task(&updated_task);
                         }
                     }
@@ -1600,7 +1611,7 @@ impl DownloadOrchestrator {
         }
     }
 
-    
+
     /// Calculate retry delay with exponential backoff
     fn calculate_retry_delay_static(retry_count: u32, config: &DownloadConfig) -> Duration {
         let base_delay = config.retry.base_delay_ms as u64;
@@ -1620,7 +1631,7 @@ impl DownloadOrchestrator {
         db: Option<&Arc<Db>>,
     ) {
         tracing::error!("Worker {}: Permanently failing task {}: {}", worker_id, task_id, message);
-        task_manager.mark_failed(task_id, message);
+        task_manager.mark_failed(task_id, message).await;
 
         let _ = progress_tx.send(ProgressUpdate {
             event: TaskEvent::Updated,
@@ -1634,7 +1645,7 @@ impl DownloadOrchestrator {
         });
 
         if let Some(db) = db {
-            if let Some(failed_task) = task_manager.get_task(task_id) {
+            if let Some(failed_task) = task_manager.get_task(task_id).await {
                 let _ = db.save_task(&failed_task);
             }
         }
@@ -1655,22 +1666,22 @@ impl DownloadOrchestrator {
                         // Resume interrupted downloads as QUEUED
                         let mut resumed_task = task.clone();
                         resumed_task.state = DownloadState::Queued;
-                        self.task_manager.add_task(resumed_task);
+                        self.task_manager.add_task(resumed_task).await;
                         restored_count += 1;
                     }
                     DownloadState::Queued | DownloadState::Waiting => {
                         // Re-queue pending downloads
-                        self.task_manager.add_task(task);
+                        self.task_manager.add_task(task).await;
                         restored_count += 1;
                     }
                     _ => {
                         // Keep other states as-is
-                        self.task_manager.add_task(task);
+                        self.task_manager.add_task(task).await;
                         restored_count += 1;
                     }
                 }
             }
-            
+
             tracing::info!("Restored {} tasks from database", restored_count);
         }
         
@@ -1865,13 +1876,13 @@ impl DownloadOrchestrator {
         
         // If source and target are the same, file is already at arr path — just trigger rescan
         if source == target_path {
-            tracing::info!("File already at target path: {:?} — triggering rescan only", target_path);
+                    tracing::info!("File already at target path: {:?} — triggering rescan only", target_path);
             let rescan_result = match media_type {
                 MediaType::TvSeries | MediaType::TvEpisode => {
-                    client.trigger_series_rescan(arr_id).await
+                    client.trigger_series_rescan_with_path(arr_id, Some(target_path.to_str().unwrap_or(""))).await
                 }
                 MediaType::Movie => {
-                    client.trigger_movie_refresh(arr_id).await
+                    client.trigger_movie_refresh_with_path(arr_id, Some(target_path.to_str().unwrap_or(""))).await
                 }
             };
             if let Err(e) = rescan_result {
@@ -1942,18 +1953,19 @@ impl DownloadOrchestrator {
             }
         };
         
-        // Trigger Arr rescan for instant import (fire-and-forget)
+        // Trigger Arr scan for instant import with the target file path (fire-and-forget)
         if move_result.is_some() {
+            let target_path_str = target_path.to_str().unwrap_or("");
             let rescan_result = match media_type {
                 MediaType::TvSeries | MediaType::TvEpisode => {
-                    client.trigger_series_rescan(arr_id).await
+                    client.trigger_series_rescan_with_path(arr_id, Some(target_path_str)).await
                 }
                 MediaType::Movie => {
-                    client.trigger_movie_refresh(arr_id).await
+                    client.trigger_movie_refresh_with_path(arr_id, Some(target_path_str)).await
                 }
             };
             if let Err(e) = rescan_result {
-                tracing::warn!("Arr rescan trigger failed (non-fatal): {}", e);
+                tracing::warn!("Arr scan trigger failed (non-fatal): {}", e);
             }
         }
         
