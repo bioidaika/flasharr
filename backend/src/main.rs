@@ -347,7 +347,9 @@ async fn main() {
         .nest("/api/media", api::media::router())
         .nest("/api/folder-source", api::folder_source::router())
         .route("/sabnzbd", get(api::sabnzbd::handle_get).post(api::sabnzbd::handle_post))
-        .route("/sabnzbd/", get(api::sabnzbd::handle_get).post(api::sabnzbd::handle_post));
+        .route("/sabnzbd/", get(api::sabnzbd::handle_get).post(api::sabnzbd::handle_post))
+        .route("/sabnzbd/api", get(api::sabnzbd::handle_get).post(api::sabnzbd::handle_post))
+        .route("/sabnzbd/api/", get(api::sabnzbd::handle_get).post(api::sabnzbd::handle_post));
 
     // External integration routes — require API key (called by Jellyflix/other integrations)
     let external_routes = Router::new()
