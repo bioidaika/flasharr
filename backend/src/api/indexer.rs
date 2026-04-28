@@ -290,17 +290,42 @@ async fn imdb_to_tmdb(imdb_id: &str) -> Option<String> {
         .map(|id| id.to_string())
 }
 
+/// Map a Sonarr/Radarr quality profile ID to the set of allowed resolution strings.
+/// Returns None for "Any" / unknown profiles (no filtering applied).
+// NOTE: assumes default Sonarr/Radarr profile IDs (custom installs that delete/recreate profiles can shift IDs).
+fn profile_id_to_allowed_resolutions(profile_id: i32) -> Option<Vec<&'static str>> {
+    match profile_id {
+        2 => Some(vec!["480p", "576p"]),       // SD
+        3 => Some(vec!["720p"]),               // HD-720p
+        4 => Some(vec!["1080p"]),              // HD-1080p
+        5 => Some(vec!["2160p"]),              // Ultra-HD
+        6 => Some(vec!["720p", "1080p"]),      // HD-720p/1080p
+        _ => None,                             // Any (1) or unknown — no filter
+    }
+}
+
+/// Returns true if the file's resolution is acceptable under the given quality filter.
+/// Files with an undetected resolution always pass (we can't classify them).
+fn resolution_allowed(resolution: Option<&str>, allowed: &Option<Vec<&'static str>>) -> bool {
+    match (resolution, allowed) {
+        (_, None) => true,                      // no filter configured
+        (None, Some(_)) => true,                // unknown resolution — let it through
+        (Some(res), Some(allowed)) => allowed.iter().any(|&a| a == res),
+    }
+}
+
 /// Convert SmartSearchResponse to Newznab XML
 /// This extracts results from the smart_search response and converts to IndexerResult format
 async fn convert_smart_response_to_xml(
-    response: axum::response::Response, 
-    query: &str, 
+    response: axum::response::Response,
+    query: &str,
     host: &str,
     apikey: &str,
     tmdb_id: Option<String>,
     media_type: &str,
     season: Option<u32>,
     episode: Option<u32>,
+    allowed_resolutions: Option<Vec<&'static str>>,
 ) -> String {
     use axum::body::to_bytes;
     use crate::api::smart_search::SmartSearchResponse;
@@ -339,10 +364,15 @@ async fn convert_smart_response_to_xml(
     if let Some(groups) = smart_response.groups {
         for group in groups {
             for file in group.files {
-                // Determine category based on filename (detects HD/UHD/TV automatically)
+                if !resolution_allowed(file.quality_attrs.resolution.as_deref(), &allowed_resolutions) {
+                    tracing::debug!(
+                        "Quality filter: skipping '{}' (resolution={:?})",
+                        file.name, file.quality_attrs.resolution
+                    );
+                    continue;
+                }
+
                 let category = determine_category(&file.name);
-                
-                // Synthesize title for Sonarr/Radarr parsing
                 let synthesized_title = synthesize_title(
                     &file,
                     tmdb_title.as_deref(),
@@ -350,22 +380,18 @@ async fn convert_smart_response_to_xml(
                     season,
                     episode,
                 );
-                
-                // Create IndexerResult
-                let result = IndexerResult {
+                indexer_results.push(IndexerResult {
                     title: synthesized_title,
                     guid: format!("fshare://{}", extract_file_id(&file.url)),
                     link: generate_nzb_url(&file.url, host, apikey, &tmdb_id, &Some(media_type.to_string()), &season, &episode),
                     size: file.size,
                     pub_date: Utc::now(),
                     category,
-                };
-                
-                indexer_results.push(result);
+                });
             }
         }
     }
-    
+
     // Handle TV seasons structure if present
     if let Some(seasons) = smart_response.seasons {
         for season_group in seasons {
@@ -376,6 +402,14 @@ async fn convert_smart_response_to_xml(
                 // own episode number so every result gets the correct S##E## tag.
                 let ep_num = Some(episode_group.episode_number);
                 for file in episode_group.files {
+                    if !resolution_allowed(file.quality_attrs.resolution.as_deref(), &allowed_resolutions) {
+                        tracing::debug!(
+                            "Quality filter: skipping '{}' (resolution={:?})",
+                            file.name, file.quality_attrs.resolution
+                        );
+                        continue;
+                    }
+
                     let synthesized_title = synthesize_title(
                         &file,
                         tmdb_title.as_deref(),
@@ -383,28 +417,26 @@ async fn convert_smart_response_to_xml(
                         Some(season_group.season),
                         ep_num,
                     );
-                    
-                    let result = IndexerResult {
+                    indexer_results.push(IndexerResult {
                         title: synthesized_title,
                         guid: format!("fshare://{}", extract_file_id(&file.url)),
                         link: generate_nzb_url(&file.url, host, apikey, &tmdb_id, &Some(media_type.to_string()), &Some(season_group.season), &ep_num),
                         size: file.size,
                         pub_date: Utc::now(),
                         category: determine_category(&file.name),
-                    };
-                    
-                    indexer_results.push(result);
+                    });
                 }
             }
         }
     }
-    
+
     tracing::info!(
-        "Converted SmartSearchResponse: {} results from {} quality groups (TMDB: {:?} {:?})",
+        "Converted SmartSearchResponse: {} results from {} quality groups (TMDB: {:?} {:?}, filter: {:?})",
         indexer_results.len(),
         group_count,
         tmdb_title,
         tmdb_year,
+        allowed_resolutions,
     );
     
     generate_search_xml(indexer_results, query)
@@ -737,20 +769,27 @@ async fn handle_tv_search(
     let tmdb_id_str = smart_req.tmdb_id.as_ref().map(|v| v.as_str().unwrap_or("").to_string());
     let season_num = smart_req.season;
     let episode_num = smart_req.episode;
-    
+
+    // Resolve quality filter from Sonarr profile setting
+    let allowed_resolutions = state.db
+        .get_setting("sonarr_quality_profile_id").ok().flatten()
+        .and_then(|s| s.parse::<i32>().ok())
+        .and_then(profile_id_to_allowed_resolutions);
+
     // Step 3: Call smart_search (already has Vietnamese title logic!)
     let response = crate::api::smart_search::handle_tv_search(state, smart_req).await;
-    
+
     // Step 4: Convert SmartSearchResponse to Newznab XML
     convert_smart_response_to_xml(
-        response, 
-        &title, 
+        response,
+        &title,
         host,
         &apikey,
         tmdb_id_str,
         "tv",
         season_num,
         episode_num,
+        allowed_resolutions,
     ).await
 }
 
@@ -806,20 +845,27 @@ async fn handle_movie_search(
     
     // Clone metadata before smart_req is moved
     let tmdb_id_str = smart_req.tmdb_id.as_ref().map(|v| v.as_str().unwrap_or("").to_string());
-    
+
+    // Resolve quality filter from Radarr profile setting
+    let allowed_resolutions = state.db
+        .get_setting("radarr_quality_profile_id").ok().flatten()
+        .and_then(|s| s.parse::<i32>().ok())
+        .and_then(profile_id_to_allowed_resolutions);
+
     // Step 4: Call smart_search (already has Vietnamese title logic!)
     let response = crate::api::smart_search::handle_movie_search(state, smart_req).await;
-    
+
     // Step 5: Convert SmartSearchResponse to Newznab XML
     convert_smart_response_to_xml(
-        response, 
-        &title, 
+        response,
+        &title,
         host,
         &apikey,
         tmdb_id_str,
         "movie",
-        None, // Movies don't have season
-        None, // Movies don't have episode
+        None,
+        None,
+        allowed_resolutions,
     ).await
 }
 
