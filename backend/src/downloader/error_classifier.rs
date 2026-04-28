@@ -336,10 +336,10 @@ mod tests {
     fn test_classify_timeout() {
         let error = anyhow::anyhow!("connection timeout");
         let category = ErrorClassifier::classify(&error);
-        
+
         match category {
             ErrorCategory::Retryable { max_retries, .. } => {
-                assert_eq!(max_retries, 10);
+                assert_eq!(max_retries, 20);
             }
             _ => panic!("Expected Retryable"),
         }
