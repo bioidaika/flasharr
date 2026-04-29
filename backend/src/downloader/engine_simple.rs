@@ -48,13 +48,15 @@ impl SimpleDownloadEngine {
     /// 2. Rescue fallback: if the target parent directory can't be created (e.g. a
     ///    root-owned subdir left by a docker exec debug session), retries in
     ///    `{appData}/downloads/rescue/` so the download still completes.
+    /// Returns the actual path where the file was written (may differ from `destination`
+    /// if `/downloads` was not writable and the engine remapped to appData/downloads/).
     pub async fn download_file<F>(
         &self,
         url: &str,
         destination: &Path,
         progress_callback: F,
         cancel_token: &CancellationToken,
-    ) -> anyhow::Result<()>
+    ) -> anyhow::Result<PathBuf>
     where
         F: Fn(DownloadProgress) + Send + Sync + 'static,
     {
@@ -113,7 +115,7 @@ impl SimpleDownloadEngine {
         dest_path: PathBuf,
         progress_callback: F,
         cancel_token: &CancellationToken,
-    ) -> anyhow::Result<()>
+    ) -> anyhow::Result<PathBuf>
     where
         F: Fn(DownloadProgress) + Send + Sync + 'static,
     {
@@ -138,7 +140,7 @@ impl SimpleDownloadEngine {
             tracing::info!("Renamed {:?} -> {:?}", temp_destination, dest_path);
         }
 
-        Ok(())
+        Ok(dest_path)
     }
 
     /// Remaps a `/downloads/...` path to `{appData}/downloads/...` when `/downloads`

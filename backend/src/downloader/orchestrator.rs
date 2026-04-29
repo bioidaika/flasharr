@@ -191,14 +191,65 @@ impl DownloadOrchestrator {
                     }
                     tracing::info!("Arr sweep: {} unannounced completed task(s) — retrying move", unannounced.len());
                     for task in &unannounced {
-                        if tokio::fs::metadata(std::path::Path::new(&task.destination)).await.is_err() {
-                            continue; // file already gone or missing — skip
-                        }
-                        if let Some(updated) = Self::move_to_arr_path(task, &arr_client_s).await {
+                        // The engine may have remapped /downloads/ to appData/downloads/ during
+                        // download (when /downloads was not writable). task.destination stores the
+                        // pre-remap path. Try the stored path first, then the remapped equivalent.
+                        let effective_destination = {
+                            let stored = std::path::Path::new(&task.destination);
+                            if tokio::fs::metadata(stored).await.is_ok() {
+                                Some(task.destination.clone())
+                            } else if task.destination.starts_with("/downloads") {
+                                let app_data_dir = std::env::var("FLASHARR_APPDATA_DIR")
+                                    .map(std::path::PathBuf::from)
+                                    .unwrap_or_else(|_| std::path::PathBuf::from("appData"));
+                                let rel = task.destination.trim_start_matches("/downloads");
+                                let remapped = app_data_dir.join("downloads").join(rel.trim_start_matches('/'));
+                                if tokio::fs::metadata(&remapped).await.is_ok() {
+                                    tracing::info!(
+                                        "Arr sweep: task {} — found at remapped path {:?} (stored path {:?} missing)",
+                                        task.id, remapped, task.destination
+                                    );
+                                    Some(remapped.to_string_lossy().to_string())
+                                } else {
+                                    tracing::warn!(
+                                        "Arr sweep: task {} — file not found at stored {:?} or remapped {:?}, skipping",
+                                        task.id, task.destination, remapped
+                                    );
+                                    None
+                                }
+                            } else {
+                                tracing::warn!(
+                                    "Arr sweep: task {} — file not found at {:?}, skipping",
+                                    task.id, task.destination
+                                );
+                                None
+                            }
+                        };
+
+                        let effective_destination = match effective_destination {
+                            Some(d) => d,
+                            None => continue,
+                        };
+
+                        // Build a task view with the resolved destination for move_to_arr_path
+                        let resolved_task = if effective_destination != task.destination {
+                            let mut t = task.clone();
+                            t.destination = effective_destination;
+                            t
+                        } else {
+                            task.clone()
+                        };
+
+                        if let Some(updated) = Self::move_to_arr_path(&resolved_task, &arr_client_s).await {
                             task_manager_s.update_task(updated.clone()).await;
                             if let Some(ref db) = db_s {
                                 let _ = db.save_task(&updated);
                             }
+                        } else {
+                            tracing::error!(
+                                "Arr sweep: move_to_arr_path returned None for task {} (tmdb_id={:?}, dest={})",
+                                task.id, task.tmdb_id, resolved_task.destination
+                            );
                         }
                     }
                 }
@@ -1455,10 +1506,16 @@ impl DownloadOrchestrator {
         
         // Handle result
         match result {
-            Ok(()) => {
-                tracing::info!("Worker {}: Download completed for {}", worker_id, task_id);
+            Ok(actual_path) => {
+                tracing::info!("Worker {}: Download completed for {} at {:?}", worker_id, task_id, actual_path);
+                // Persist the actual path the engine used (engine may have remapped /downloads/
+                // to appData/downloads/ when /downloads was not writable). Without this update,
+                // the background sweep checks task.destination which doesn't exist and silently
+                // skips the task every 5 minutes, leaving arr_announced=false forever.
+                task.destination = actual_path.to_string_lossy().to_string();
+                task_manager.update_task(task.clone()).await;
                 task_manager.mark_completed(task_id).await;
-                
+
                 // Post-completion: Move file to Sonarr/Radarr's series/movie folder
                 // This allows Sonarr/Radarr's disk scan to detect and import the file
                 if let Some(completed_task) = task_manager.get_task(task_id).await {
@@ -1466,15 +1523,21 @@ impl DownloadOrchestrator {
                         &completed_task,
                         arr_client,
                     ).await;
-                    
+
                     // Update task with new destination if file was moved
                     if let Some(updated_task) = moved_task {
                         task_manager.update_task(updated_task.clone()).await;
                         if let Some(db) = db {
                             let _ = db.save_task(&updated_task);
                         }
-                    } else if let Some(db) = db {
-                        let _ = db.save_task(&completed_task);
+                    } else {
+                        tracing::error!(
+                            "Worker {}: move_to_arr_path returned None for {} (tmdb_id={:?}, dest={})",
+                            worker_id, task_id, completed_task.tmdb_id, completed_task.destination
+                        );
+                        if let Some(db) = db {
+                            let _ = db.save_task(&completed_task);
+                        }
                     }
                 }
                 
