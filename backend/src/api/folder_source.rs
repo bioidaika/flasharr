@@ -17,6 +17,7 @@ use quick_xml::Reader;
 use quick_xml::events::Event;
 use crate::AppState;
 use crate::utils::parser::FilenameParser;
+use crate::db::sqlite::CachedFolderItem;
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
@@ -127,7 +128,7 @@ fn default_search_limit() -> u32 {
 /// Search response
 #[derive(Debug, Serialize)]
 struct SearchResponse {
-    results: Vec<crate::db::CachedFolderItem>,
+    results: Vec<CachedFolderItem>,
     total: usize,
     query: String,
 }

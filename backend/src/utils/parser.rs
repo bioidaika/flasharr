@@ -206,13 +206,13 @@ pub struct ParsedFilename {
 }
 
 pub struct FilenameParser;
-#[allow(dead_code)]
 
+#[allow(dead_code)]
 static SE_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
 static YEAR_PATTERN: OnceLock<Regex> = OnceLock::new();
 static QUALITY_PATTERN: OnceLock<Regex> = OnceLock::new();
-    #[allow(dead_code)]
 
+#[allow(dead_code)]
 impl FilenameParser {
     fn se_patterns() -> &'static Vec<Regex> {
         SE_PATTERNS.get_or_init(|| {

@@ -107,6 +107,22 @@ impl PathBuilder {
         }
     }
     
+    /// Normalizes a file extension to a known video format.
+    /// If `ext` is not a recognized video container, returns `"mkv"`.
+    /// Comparison is case-insensitive so `.Flasharr`, `.FLASHARR`, etc. all map to `"mkv"`.
+    pub fn normalize_video_extension(ext: &str) -> String {
+        const VIDEO_EXTS: &[&str] = &[
+            "mkv", "mp4", "avi", "ts", "m2ts", "mov", "wmv", "m4v",
+            "flv", "webm", "rmvb", "rm", "divx", "xvid", "mpg", "mpeg", "vob",
+        ];
+        let lower = ext.to_lowercase();
+        if VIDEO_EXTS.iter().any(|&v| v == lower) {
+            lower
+        } else {
+            "mkv".to_string()
+        }
+    }
+
     /// Sanitize a string for use as a folder/file name
     pub fn sanitize_filename(name: &str) -> String {
         name.chars()

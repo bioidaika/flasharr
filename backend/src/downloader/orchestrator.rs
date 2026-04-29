@@ -158,6 +158,52 @@ impl DownloadOrchestrator {
             let handle = self.spawn_worker(worker_id);
             workers.push(handle);
         }
+
+        // Background sweep: retry COMPLETED tasks that weren't moved to the arr library
+        // (arr_announced=false). Runs every 5 minutes to auto-recover from transient move failures.
+        {
+            let arr_client_s = Arc::clone(&self.arr_client);
+            let db_s = self.db.clone();
+            let task_manager_s = Arc::clone(&self.task_manager);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+                interval.tick().await; // skip initial immediate tick
+                loop {
+                    interval.tick().await;
+                    let unannounced: Vec<DownloadTask> = if let Some(ref db) = db_s {
+                        match db.get_tasks_by_states_async(vec!["COMPLETED".to_string()]).await {
+                            Ok(tasks) => tasks.into_iter()
+                                .filter(|t| !t.arr_announced && t.tmdb_id.is_some())
+                                .collect(),
+                            Err(e) => {
+                                tracing::warn!("Arr sweep: DB error: {}", e);
+                                vec![]
+                            }
+                        }
+                    } else {
+                        task_manager_s.get_tasks().await.into_iter()
+                            .filter(|t| t.state == DownloadState::Completed && !t.arr_announced && t.tmdb_id.is_some())
+                            .collect()
+                    };
+
+                    if unannounced.is_empty() {
+                        continue;
+                    }
+                    tracing::info!("Arr sweep: {} unannounced completed task(s) — retrying move", unannounced.len());
+                    for task in &unannounced {
+                        if tokio::fs::metadata(std::path::Path::new(&task.destination)).await.is_err() {
+                            continue; // file already gone or missing — skip
+                        }
+                        if let Some(updated) = Self::move_to_arr_path(task, &arr_client_s).await {
+                            task_manager_s.update_task(updated.clone()).await;
+                            if let Some(ref db) = db_s {
+                                let _ = db.save_task(&updated);
+                            }
+                        }
+                    }
+                }
+            });
+        }
     }
     
     /// Stop orchestrator
@@ -295,11 +341,15 @@ impl DownloadOrchestrator {
         
         // Create Sonarr/Radarr compatible filename if TMDB metadata exists
         let final_filename = if let Some(mut meta) = tmdb_metadata.clone() {
-            // Extract file extension from original filename
-            let extension = std::path::Path::new(&filename)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("mkv");
+            // Extract file extension from original filename; normalize community tags
+            // like ".Flasharr" (Fshare uploader convention) to ".mkv" so Sonarr/Radarr
+            // recognise the file.
+            let extension = PathBuilder::normalize_video_extension(
+                std::path::Path::new(&filename)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("mkv"),
+            );
             
             // For TV shows: Always create clean filename if we have season/episode
             if let (Some(season), Some(episode)) = (meta.season, meta.episode) {
@@ -1935,26 +1985,43 @@ impl DownloadOrchestrator {
                 }
                 Some(updated)
             }
-            Err(e) => {
-                // If rename fails (e.g. cross-device), try to copy and remove
-                tracing::warn!("Failed to rename {:?} -> {:?}: {}. Trying copy+remove fallback.", source, target_path, e);
-                match tokio::fs::copy(&source, &target_path).await {
-                    Ok(_) => {
-                        let _ = tokio::fs::remove_file(&source).await;
-                        tracing::info!("Successfully copied and removed {:?} -> {:?}", source, target_path);
-                        let mut updated = task.clone();
-                        updated.destination = target_path.to_string_lossy().to_string();
-                        updated.arr_announced = true;
-                        match media_type {
-                            MediaType::TvSeries | MediaType::TvEpisode => updated.arr_series_id = Some(arr_id as i64),
-                            MediaType::Movie => updated.arr_movie_id = Some(arr_id as i64),
+            Err(rename_err) => {
+                // If rename fails (e.g. cross-device move or transient permission error after
+                // download completes), retry copy up to 3 times with a 2s delay between each.
+                // Use spawn_blocking+std::fs::copy to avoid copy_file_range failures on LXC/Docker overlays.
+                tracing::warn!("Failed to rename {:?} -> {:?}: {}. Trying copy+remove fallback.", source, target_path, rename_err);
+                let src_buf = source.to_path_buf();
+                let dst_buf = target_path.clone();
+                let mut copy_ok = false;
+                for attempt in 1..=3u32 {
+                    let src2 = src_buf.clone();
+                    let dst2 = dst_buf.clone();
+                    match tokio::task::spawn_blocking(move || std::fs::copy(&src2, &dst2)).await {
+                        Ok(Ok(_)) => { copy_ok = true; break; }
+                        Ok(Err(e)) => {
+                            tracing::warn!("Copy attempt {}/3 {:?}: {}", attempt, src_buf, e);
+                            if attempt < 3 { tokio::time::sleep(std::time::Duration::from_secs(2)).await; }
                         }
-                        Some(updated)
+                        Err(e) => {
+                            tracing::warn!("Copy spawn failed attempt {}/3: {}", attempt, e);
+                            if attempt < 3 { tokio::time::sleep(std::time::Duration::from_secs(2)).await; }
+                        }
                     }
-                    Err(copy_err) => {
-                        tracing::error!("Failed to move or copy {:?} -> {:?}: {}", source, target_path, copy_err);
-                        None
+                }
+                if copy_ok {
+                    let _ = tokio::fs::remove_file(&source).await;
+                    tracing::info!("Successfully copied and removed {:?} -> {:?}", source, target_path);
+                    let mut updated = task.clone();
+                    updated.destination = target_path.to_string_lossy().to_string();
+                    updated.arr_announced = true;
+                    match media_type {
+                        MediaType::TvSeries | MediaType::TvEpisode => updated.arr_series_id = Some(arr_id as i64),
+                        MediaType::Movie => updated.arr_movie_id = Some(arr_id as i64),
                     }
+                    Some(updated)
+                } else {
+                    tracing::error!("Failed to move or copy {:?} -> {:?} after 3 attempts", source, target_path);
+                    None
                 }
             }
         };

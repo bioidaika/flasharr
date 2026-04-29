@@ -7,7 +7,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use crate::utils::title_matcher::{
     calculate_unified_similarity, group_by_quality, SmartSearchResult, QualityGroup,
-    extract_core_title, normalize_vietnamese, is_vietnamese_title, detect_badges
+    extract_core_title, normalize_vietnamese, detect_badges
 };
 use crate::utils::unified_scorer::{calculate_match_score, is_valid_match};
 use crate::utils::smart_tokenizer::smart_parse;
@@ -147,7 +147,7 @@ pub async fn handle_movie_search(
     let official_name = enrichment_cache.official.clone().unwrap_or_else(|| title.clone());
     let aliases = enrichment_cache.all_aliases.clone();
     let base_poster = enrichment_cache.poster.clone();
-    let collections = enrichment_cache.collections.clone();
+    let _collections = enrichment_cache.collections.clone();
     let base_tmdb_id = tmdb_id_str.as_ref().and_then(|s| s.parse::<u64>().ok());
 
     // ── 2. PARALLEL FSHARE SEARCHES ─────────────────────────────────────────
@@ -244,8 +244,8 @@ pub async fn handle_movie_search(
     for r in target_results {
         let parsed = smart_parse(&r.name);
 
-        let mut final_id = base_tmdb_id;
-        let mut final_poster = base_poster.clone();
+        let final_id = base_tmdb_id;
+        let final_poster = base_poster.clone();
         
         // Use unified scorer for primary match (movies: 70% title + 20% year)
         let primary_score = calculate_match_score(
@@ -362,7 +362,7 @@ pub async fn handle_tv_search(
     };
     
     let core_title = extract_core_title(&title);
-    let query_keyword = if let Some(ref y) = year_str {
+    let _query_keyword = if let Some(ref y) = year_str {
         format!("{} {}", core_title, y)
     } else {
         core_title

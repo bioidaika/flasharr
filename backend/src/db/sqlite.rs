@@ -1057,7 +1057,7 @@ impl Db {
             let conn = pool.get().map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
             
             // Build WHERE clause for status filter
-            let where_clause = match &status_filter {
+            let _where_clause = match &status_filter {
                 Some(status) => format!("WHERE state = '{}'", status),
                 None => String::new(),
             };

@@ -50,11 +50,15 @@ pub struct IndexerParams {
     #[serde(default)]
     pub ep: Option<u32>,
     
-    /// IMDB ID (for movies)
+    /// TMDB ID (for movies — Radarr sends this directly)
+    #[serde(default)]
+    pub tmdbid: Option<String>,
+
+    /// IMDB ID (for movies — fallback if tmdbid not present)
     #[serde(default)]
     #[allow(dead_code)]
     pub imdbid: Option<String>,
-    
+
     /// TVDB ID (for TV)
     #[serde(default)]
     #[allow(dead_code)]
@@ -104,8 +108,8 @@ async fn handle_indexer(
         .unwrap_or("localhost:8484");
     
     tracing::info!(
-        "Newznab API request - mode: {}, q: {:?}, season: {:?}, ep: {:?}, imdbid: {:?}, tvdbid: {:?}, cat: {:?}, apikey: {:?}",
-        params.t, params.q, params.season, params.ep, params.imdbid, params.tvdbid, params.cat, params.apikey
+        "Newznab API request - mode: {}, q: {:?}, season: {:?}, ep: {:?}, tmdbid: {:?}, imdbid: {:?}, tvdbid: {:?}, cat: {:?}, apikey: {:?}",
+        params.t, params.q, params.season, params.ep, params.tmdbid, params.imdbid, params.tvdbid, params.cat, params.apikey
     );
     
     let (status, xml_body) = match params.t.as_str() {
@@ -225,7 +229,7 @@ fn handle_caps() -> String {
   <searching>
     <search available="yes" supportedParams="q" />
     <tv-search available="yes" supportedParams="q,season,ep,tvdbid" />
-    <movie-search available="yes" supportedParams="q,imdbid" />
+    <movie-search available="yes" supportedParams="q,tmdbid,imdbid" />
   </searching>
   <categories>
     <category id="2000" name="Movies">
@@ -292,7 +296,7 @@ async fn imdb_to_tmdb(imdb_id: &str) -> Option<String> {
 
 /// Map a Sonarr/Radarr quality profile ID to the set of allowed resolution strings.
 /// Returns None for "Any" / unknown profiles (no filtering applied).
-// NOTE: assumes default Sonarr/Radarr profile IDs (custom installs that delete/recreate profiles can shift IDs).
+// NOTE: assumes default Sonarr/Radarr profile IDs (custom installs that delete/recreate profiles can shift IDs)
 fn profile_id_to_allowed_resolutions(profile_id: i32) -> Option<Vec<&'static str>> {
     match profile_id {
         2 => Some(vec!["480p", "576p"]),       // SD
@@ -482,7 +486,7 @@ pub async fn fetch_tmdb_title(tmdb_id: &str, media_type: &str) -> Option<String>
         let data: Value = resp.json().await.ok()?;
         if media_type == "tv" {
             let name = data["name"].as_str().unwrap_or("");
-            let year = data["first_air_date"].as_str()
+            let _year = data["first_air_date"].as_str()
                 .and_then(|d| d.split('-').next())
                 .unwrap_or("");
             if !name.is_empty() {
@@ -801,8 +805,11 @@ async fn handle_movie_search(
 ) -> String {
     let apikey = params.apikey.clone();
     
-    // Step 1: Convert IMDB ID to TMDB ID if provided
-    let tmdb_id = if let Some(imdb_id) = params.imdbid {
+    // Step 1: Resolve TMDB ID — prefer direct tmdbid, fall back to converting imdbid
+    let tmdb_id = if let Some(ref id) = params.tmdbid {
+        tracing::info!("Using direct TMDB ID from Radarr: {}", id);
+        Some(Value::String(id.clone()))
+    } else if let Some(imdb_id) = params.imdbid {
         match imdb_to_tmdb(&imdb_id).await {
             Some(id) => {
                 tracing::info!("Converted IMDB {} → TMDB {}", imdb_id, id);

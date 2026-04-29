@@ -8,11 +8,11 @@ pub mod client;
 
 pub use artifact_manager::{ArrArtifactManager, ArtifactStatus};
 pub use client::{
-    ArrClient, RootFolder,
+    ArrClient,
     // Sonarr types
-    SonarrSeries, SonarrStatistics, SonarrEpisode, SonarrCalendarEntry, SonarrCalendarSeries,
+    SonarrSeries, SonarrEpisode, SonarrCalendarEntry,
     // Radarr types
-    RadarrMovie, RadarrCollection,
+    RadarrMovie,
     // Shared types
-    MediaImage, DiskSpace, ArrHistoryRecord, SystemStatus, HealthCheck,
+    DiskSpace, HealthCheck,
 };
