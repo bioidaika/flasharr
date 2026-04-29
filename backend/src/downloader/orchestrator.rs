@@ -218,11 +218,14 @@ impl DownloadOrchestrator {
                                     None
                                 }
                             } else {
-                                tracing::warn!(
-                                    "Arr sweep: task {} — file not found at {:?}, skipping",
+                                // File is gone from downloads — Sonarr/Radarr already imported it
+                                // via SABnzbd history. Pass the task through so move_to_arr_path
+                                // can trigger a RescanSeries and set arr_announced=true.
+                                tracing::info!(
+                                    "Arr sweep: task {} — file not found at {:?}, assuming arr imported; handing off for rescan",
                                     task.id, task.destination
                                 );
-                                None
+                                Some(task.destination.clone())
                             }
                         };
 
@@ -2020,8 +2023,32 @@ impl DownloadOrchestrator {
 
         // Create target directory
         if let Err(e) = tokio::fs::create_dir_all(&target_dir).await {
-            tracing::error!("Failed to create target directory {:?}: {}", target_dir, e);
-            return None;
+            // Media path is not mounted in this container (e.g. /data/media not in compose volumes).
+            // Sonarr/Radarr imports the file autonomously via SABnzbd history polling.
+            // Trigger a rescan so arr picks up whatever it already imported, then mark announced.
+            tracing::warn!(
+                "Cannot create target dir {:?}: {} — media path not mounted. \
+                 Trusting arr SABnzbd import; triggering rescan and marking announced.",
+                target_dir, e
+            );
+            let rescan_result = match media_type {
+                MediaType::TvSeries | MediaType::TvEpisode => {
+                    client.trigger_series_rescan_with_path(arr_id, None).await
+                }
+                MediaType::Movie => {
+                    client.trigger_movie_refresh_with_path(arr_id, None).await
+                }
+            };
+            if let Err(re) = rescan_result {
+                tracing::warn!("Arr rescan trigger failed (non-fatal): {}", re);
+            }
+            let mut updated = task.clone();
+            updated.arr_announced = true;
+            match media_type {
+                MediaType::TvSeries | MediaType::TvEpisode => updated.arr_series_id = Some(arr_id as i64),
+                MediaType::Movie => updated.arr_movie_id = Some(arr_id as i64),
+            }
+            return Some(updated);
         }
 
         // If a symlink or file already exists at target, remove it first (re-grab scenario)
