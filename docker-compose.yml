@@ -16,8 +16,8 @@ services:
       # AppData volume for persistence
       - ./appData:/appData
       
-      # Optional: Separate downloads volume
-      # - /path/to/downloads:/appData/downloads
+      # Downloads volume - mapped to host D:\flasharr
+      - D:\flasharr:/downloads
     
     environment:
       # AppData directory
