@@ -34,6 +34,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires local dataset file at debug_log/dataset_1.json"]
     fn compare_parsers() {
         // Load dataset from JSON
         use std::fs::File;

@@ -231,7 +231,7 @@ async fn check_webhook(_state: &AppState) -> ServiceHealth {
     }
 }
 
-async fn check_fshare_ping(state: &AppState) -> ServiceHealth {
+async fn check_fshare_ping(_state: &AppState) -> ServiceHealth {
     // Actual ping to Fshare to test connectivity
     let start = std::time::Instant::now();
     let client = reqwest::Client::new();

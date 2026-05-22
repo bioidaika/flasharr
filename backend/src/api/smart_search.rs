@@ -7,11 +7,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use crate::utils::title_matcher::{
     calculate_unified_similarity, group_by_quality, SmartSearchResult, QualityGroup,
-    extract_core_title, normalize_vietnamese, is_vietnamese_title, detect_badges
+    extract_core_title, normalize_vietnamese, detect_badges
 };
 use crate::utils::unified_scorer::{calculate_match_score, is_valid_match};
 use crate::utils::smart_tokenizer::smart_parse;
-use crate::db::CachedFolderItem;
 use tracing::info;
 use regex::Regex;
 use std::sync::Arc;
@@ -47,26 +46,6 @@ pub struct SmartSearchResponse {
     pub groups: Option<Vec<QualityGroup>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seasons: Option<Vec<SeasonGroup>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub folder_matches: Option<Vec<FolderMatch>>,
-}
-
-/// A folder/file match from the local folder cache
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct FolderMatch {
-    pub name: String,
-    pub title: String,
-    pub fshare_url: String,
-    pub linkcode: String,
-    pub is_directory: bool,
-    pub size: u64,
-    pub quality: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tmdb_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub poster_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub year: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -168,7 +147,7 @@ pub async fn handle_movie_search(
     let official_name = enrichment_cache.official.clone().unwrap_or_else(|| title.clone());
     let aliases = enrichment_cache.all_aliases.clone();
     let base_poster = enrichment_cache.poster.clone();
-    let collections = enrichment_cache.collections.clone();
+    let _collections = enrichment_cache.collections.clone();
     let base_tmdb_id = tmdb_id_str.as_ref().and_then(|s| s.parse::<u64>().ok());
 
     // ── 2. PARALLEL FSHARE SEARCHES ─────────────────────────────────────────
@@ -231,14 +210,14 @@ pub async fn handle_movie_search(
     }).collect();
 
     // Run Fshare API + folder cache search in parallel
-    let (all_search_batches, folder_matches) = tokio::join!(
+    let (all_search_batches, folder_results) = tokio::join!(
         futures_util::future::join_all(fshare_futures),
         search_folder_cache(&state, &all_queries)
     );
 
-    info!("Folder cache returned {} matches", folder_matches.len());
+    info!("Folder cache returned {} matches", folder_results.len());
 
-    // Flatten + deduplicate by pure fcode
+    // Flatten + deduplicate by pure fcode (timfshare results first, then folder cache)
     let mut results_pool: Vec<RawFshareResult> = Vec::new();
     let mut seen_fcodes: std::collections::HashSet<String> = std::collections::HashSet::new();
     for batch in all_search_batches {
@@ -247,6 +226,12 @@ pub async fn handle_movie_search(
             if seen_fcodes.insert(pure_fcode) {
                 results_pool.push(r);
             }
+        }
+    }
+    for r in folder_results {
+        let pure_fcode = r.fcode.split('?').next().unwrap_or(&r.fcode).to_string();
+        if seen_fcodes.insert(pure_fcode) {
+            results_pool.push(r);
         }
     }
     let target_results = results_pool.into_iter().take(100).collect::<Vec<_>>();
@@ -259,8 +244,8 @@ pub async fn handle_movie_search(
     for r in target_results {
         let parsed = smart_parse(&r.name);
 
-        let mut final_id = base_tmdb_id;
-        let mut final_poster = base_poster.clone();
+        let final_id = base_tmdb_id;
+        let final_poster = base_poster.clone();
         
         // Use unified scorer for primary match (movies: 70% title + 20% year)
         let primary_score = calculate_match_score(
@@ -352,7 +337,6 @@ pub async fn handle_movie_search(
         r#type: "movie".to_string(),
         groups: Some(groups),
         seasons: None,
-        folder_matches: if folder_matches.is_empty() { None } else { Some(folder_matches) },
     };
     
     state.search_cache.insert(cache_key, response.clone()).await;
@@ -378,7 +362,7 @@ pub async fn handle_tv_search(
     };
     
     let core_title = extract_core_title(&title);
-    let query_keyword = if let Some(ref y) = year_str {
+    let _query_keyword = if let Some(ref y) = year_str {
         format!("{} {}", core_title, y)
     } else {
         core_title
@@ -513,12 +497,12 @@ pub async fn handle_tv_search(
     }).collect();
 
     // Run Fshare API + folder cache search in parallel
-    let (all_search_batches, folder_matches) = tokio::join!(
+    let (all_search_batches, folder_results) = tokio::join!(
         futures_util::future::join_all(fshare_futures),
         search_folder_cache(&state, &all_queries)
     );
     info!("📊 [PERF] Phase 2 (parallel Fshare + folder cache) took: {:?}", phase2_start.elapsed());
-    info!("Folder cache returned {} matches for TV", folder_matches.len());
+    info!("Folder cache returned {} matches for TV", folder_results.len());
 
     // Flatten + deduplicate by pure fcode
     let mut results_pool: Vec<RawFshareResult> = Vec::new();
@@ -529,6 +513,12 @@ pub async fn handle_tv_search(
             if seen.insert(pure_fcode.clone()) {
                 results_pool.push(r);
             }
+        }
+    }
+    for r in folder_results {
+        let pure_fcode = r.fcode.split('?').next().unwrap_or(&r.fcode).to_string();
+        if seen.insert(pure_fcode) {
+            results_pool.push(r);
         }
     }
 
@@ -1117,7 +1107,6 @@ pub async fn handle_tv_search(
         r#type: if episode.is_some() { "episode".to_string() } else { "tv".to_string() },
         groups: None,
         seasons: Some(seasons),
-        folder_matches: if folder_matches.is_empty() { None } else { Some(folder_matches) },
     };
     
     info!("📊 [PERF] Phase 4 (Parse & Evaluate) took: {:?}", phase4_start.elapsed());
@@ -1145,40 +1134,32 @@ async fn execute_fshare_search_cached(
     SearchPipeline::execute_fshare_search_cached(client, query, limit, cache).await
 }
 
-/// Search the local folder cache with multiple queries, dedup by linkcode
-async fn search_folder_cache(state: &Arc<AppState>, queries: &[String]) -> Vec<FolderMatch> {
+/// Search the local folder cache with multiple queries, dedup by linkcode.
+/// Returns files only as RawFshareResult so they flow through the same scoring pipeline.
+async fn search_folder_cache(state: &Arc<AppState>, queries: &[String]) -> Vec<RawFshareResult> {
     let mut seen = std::collections::HashSet::new();
     let mut matches = Vec::new();
 
     for q in queries {
         if let Ok(results) = state.folder_cache_service.search(q, 20).await {
             for item in results {
+                // Skip directories — only actual files become downloadable results
+                if item.is_directory {
+                    continue;
+                }
                 if seen.insert(item.linkcode.clone()) {
-                    matches.push(FolderMatch {
+                    matches.push(RawFshareResult {
                         name: item.name,
-                        title: item.title,
-                        fshare_url: item.fshare_url,
-                        linkcode: item.linkcode,
-                        is_directory: item.is_directory,
+                        url: item.fshare_url,
+                        fcode: item.linkcode,
                         size: item.size,
-                        quality: item.quality,
-                        tmdb_id: item.tmdb_id,
-                        poster_path: item.poster_path,
-                        year: item.year,
+                        score: 0,
                     });
                 }
             }
         }
     }
 
-    // Prioritize: directories first (collection folders), then by size desc
-    matches.sort_by(|a, b| {
-        b.is_directory.cmp(&a.is_directory)
-            .then(b.size.cmp(&a.size))
-    });
-
-    // Cap at 30 results
-    matches.truncate(30);
     matches
 }
 

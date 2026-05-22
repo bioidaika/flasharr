@@ -14,7 +14,7 @@
   import { toasts } from "$lib/stores/toasts";
   import { ui } from "$lib/stores/ui.svelte";
   import { MediaCard } from "$lib/components";
-  import Button from "$lib/components/ui/Button.svelte";
+  import { Button, Badge } from "@media-set/core-ui";
   import {
     fetchAllMovies,
     formatDiskSize,
@@ -367,9 +367,11 @@
       <aside class="detail-sidebar">
         <div class="action-panel glass-panel">
           {#if inLibrary}
-            <div class="library-badge">
-              <span class="material-icons">video_library</span>
-              IN LIBRARY
+            <div class="mb-2 w-full">
+              <Badge variant="success" size="sm" class="w-full justify-center rounded-lg">
+                <span class="material-icons" style="font-size: 13px;">video_library</span>
+                IN LIBRARY
+              </Badge>
             </div>
           {/if}
           <Button
@@ -1138,26 +1140,6 @@
   }
 
   /* Library Integration Styles */
-  .library-badge {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.6rem 1rem;
-    background: rgba(52, 211, 153, 0.1);
-    border: 1px solid rgba(52, 211, 153, 0.3);
-    border-radius: 8px;
-    color: #34d399;
-    font-size: 0.75rem;
-    font-weight: 800;
-    letter-spacing: 0.1em;
-    font-family: var(--font-mono);
-    margin-bottom: 0.5rem;
-  }
-
-  .library-badge .material-icons {
-    font-size: 1rem;
-  }
-
   .add-library-btn {
     display: flex;
     align-items: center;

@@ -8,6 +8,7 @@
     type DiskSpace,
   } from "$lib/stores/arr";
   import { toasts } from "$lib/stores/toasts";
+  import { Badge } from "@media-set/core-ui";
 
   let library = $state<LibraryOverview | null>(null);
   let storage = $state<DiskSpace[]>([]);
@@ -55,14 +56,8 @@
   {:else}
     <!-- Connection Status -->
     <div class="connection-row">
-      <div class="conn-badge" class:active={library.sonarr_connected}>
-        <span class="dot"></span>
-        SONARR
-      </div>
-      <div class="conn-badge" class:active={library.radarr_connected}>
-        <span class="dot"></span>
-        RADARR
-      </div>
+      <Badge variant={library.sonarr_connected ? "success" : "default"} class={library.sonarr_connected ? "" : "opacity-40"}>SONARR</Badge>
+      <Badge variant={library.radarr_connected ? "success" : "default"} class={library.radarr_connected ? "" : "opacity-40"}>RADARR</Badge>
     </div>
 
     <!-- Stats Grid -->
@@ -182,39 +177,7 @@
     gap: 0.5rem;
   }
 
-  .conn-badge {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 0.55rem;
-    font-weight: 900;
-    letter-spacing: 0.1em;
-    color: var(--text-muted);
-    opacity: 0.4;
-    background: rgba(255, 255, 255, 0.02);
-    padding: 3px 8px;
-    border-radius: 3px;
-    border: 1px solid rgba(255, 255, 255, 0.05);
-  }
 
-  .conn-badge.active {
-    opacity: 1;
-    color: #00ff80;
-    border-color: rgba(0, 255, 128, 0.2);
-    background: rgba(0, 255, 128, 0.05);
-  }
-
-  .conn-badge .dot {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: rgba(255, 255, 255, 0.2);
-  }
-
-  .conn-badge.active .dot {
-    background: #00ff80;
-    box-shadow: 0 0 6px #00ff80;
-  }
 
   /* Stats Grid */
   .lib-stats-grid {

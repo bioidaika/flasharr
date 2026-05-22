@@ -73,17 +73,21 @@ impl PathBuilder {
                     }
                 }
                 "tv" => {
-                    // Build: SeriesName/Season XX/filename
+                    // Build: SeriesName (Year)/Season XX/filename
                     let series_folder = if let Some(ref title) = meta.title {
-                        Self::sanitize_filename(title)
+                        if let Some(year) = meta.year {
+                            format!("{} ({})", Self::sanitize_filename(title), year)
+                        } else {
+                            Self::sanitize_filename(title)
+                        }
                     } else {
                         "Unknown Series".to_string()
                     };
                     
                     let season_folder = if let Some(season) = meta.season {
-                        format!("Season {:02}", season)
+                        format!("Season {}", season)
                     } else {
-                        "Season 01".to_string()
+                        "Season 1".to_string()
                     };
                     
                     base_dir.join(&series_folder)
@@ -103,6 +107,22 @@ impl PathBuilder {
         }
     }
     
+    /// Normalizes a file extension to a known video format.
+    /// If `ext` is not a recognized video container, returns `"mkv"`.
+    /// Comparison is case-insensitive so `.Flasharr`, `.FLASHARR`, etc. all map to `"mkv"`.
+    pub fn normalize_video_extension(ext: &str) -> String {
+        const VIDEO_EXTS: &[&str] = &[
+            "mkv", "mp4", "avi", "ts", "m2ts", "mov", "wmv", "m4v",
+            "flv", "webm", "rmvb", "rm", "divx", "xvid", "mpg", "mpeg", "vob",
+        ];
+        let lower = ext.to_lowercase();
+        if VIDEO_EXTS.iter().any(|&v| v == lower) {
+            lower
+        } else {
+            "mkv".to_string()
+        }
+    }
+
     /// Sanitize a string for use as a folder/file name
     pub fn sanitize_filename(name: &str) -> String {
         name.chars()

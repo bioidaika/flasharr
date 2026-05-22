@@ -55,7 +55,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     
     // Send initial SYNC_ALL message with only active tasks (DOWNLOADING/STARTING)
     // Historical tasks should be loaded via API with pagination
-    let tasks = state.download_orchestrator.task_manager().get_active_tasks();
+    let tasks = state.download_orchestrator.task_manager().get_active_tasks().await;
     let sync_msg = WsMessage::SyncAll { tasks };
     
     if let Ok(json) = serde_json::to_string(&sync_msg) {

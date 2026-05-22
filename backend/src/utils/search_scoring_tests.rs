@@ -1,4 +1,4 @@
-use crate::utils::unified_scorer::{calculate_match_score, is_valid_match};
+use crate::utils::unified_scorer::calculate_match_score;
 use crate::utils::title_matcher::calculate_unified_similarity;
 
 /// Test cases based on real-world successes and failures

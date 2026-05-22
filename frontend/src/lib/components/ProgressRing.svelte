@@ -15,9 +15,9 @@
     bgColor = "rgba(255,255,255,0.1)",
   }: Props = $props();
 
-  const radius = (size - strokeWidth) / 2;
-  const circumference = radius * 2 * Math.PI;
-  const offset = circumference - (progress / 100) * circumference;
+  const radius = $derived((size - strokeWidth) / 2);
+  const circumference = $derived(radius * 2 * Math.PI);
+  const offset = $derived(circumference - (progress / 100) * circumference);
 </script>
 
 <div

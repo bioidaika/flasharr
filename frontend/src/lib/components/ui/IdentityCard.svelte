@@ -1,6 +1,6 @@
 <script lang="ts">
-  import UserAvatar from "./UserAvatar.svelte";
-  import Badge from "$lib/components/ui/Badge.svelte";
+  import { UserAvatar } from "@media-set/core-ui";
+  import { Badge } from "@media-set/core-ui";
 
   interface Props {
     email: string;

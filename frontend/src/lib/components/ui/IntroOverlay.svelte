@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import anime from "animejs";
+  import { animate, createTimeline, set as animeSet } from "$lib/animations";
   import { ui } from "$lib/stores/ui.svelte";
 
   interface Props {
@@ -26,7 +26,7 @@
   let scanLine: HTMLDivElement;
   let particleBox: HTMLDivElement;
 
-  let idleAnims: ReturnType<typeof anime>[] = [];
+  let idleAnims: any[] = [];
   let idleRunning = false;
 
   const TITLE = "FLASHARR";
@@ -61,31 +61,31 @@
      Total: ~2.4s
   ═══════════════════════════════════════════════ */
   function playAppear() {
-    const tl = anime.timeline({ autoplay: true });
+    const tl = createTimeline({ autoplay: true, onComplete: playIdle });
 
     /* ─── Act 1: Darkness & anticipation (0–800ms) ─── */
 
     // A thin horizontal light streak races across the screen left→right
     tl.add(
+      streakLine,
       {
-        targets: streakLine,
         translateX: ["-110vw", "110vw"],
         opacity: [0, 1, 1, 0],
         scaleY: [0.5, 1, 1, 0.5],
         duration: 700,
-        easing: "easeInOutQuart",
+        ease: "inOutQuart",
       },
       100,
     );
 
     // As streak passes center, a soft glow orb blooms behind where logo will be
     tl.add(
+      glowOrb,
       {
-        targets: glowOrb,
         scale: [0, 1.3],
         opacity: [0, 0.8],
         duration: 400,
-        easing: "easeOutQuad",
+        ease: "outQuad",
       },
       300,
     );
@@ -94,56 +94,56 @@
 
     // Hard white flash — very brief
     tl.add(
+      flashLayer,
       {
-        targets: flashLayer,
         opacity: [0, 0.9, 0],
         duration: 180,
-        easing: "easeOutQuad",
+        ease: "outQuad",
       },
       500,
     );
 
     // Inner ring expands
     tl.add(
+      ringInner,
       {
-        targets: ringInner,
         scale: [0, 1],
         opacity: [0.8, 0],
         duration: 600,
-        easing: "easeOutCubic",
+        ease: "outCubic",
       },
       520,
     );
 
     // Outer ring expands (staggered)
     tl.add(
+      ringOuter,
       {
-        targets: ringOuter,
         scale: [0, 1],
         opacity: [0.5, 0],
         duration: 800,
-        easing: "easeOutCubic",
+        ease: "outCubic",
       },
       550,
     );
 
     // VIBRANT GLITCH ENTRY (Sync with Logo Slam)
     tl.add(
+      [chromaR, chromaB],
       {
-        targets: [chromaR, chromaB],
         opacity: [0, 1, 0.4, 0.8, 0],
         translateX: () =>
           (Math.random() > 0.5 ? 1 : -1) * (Math.random() * 15 + 5),
         duration: 450,
-        easing: "steps(8)",
+        ease: "linear",
       },
       500,
     );
 
     // Violent Logo Slam / White Glitch Entry (logo appears here, no fade-in)
     tl.add(
+      logoImg,
       {
-        targets: logoImg,
         opacity: [0, 1],
         scale: [1.6, 1],
         filter: [
@@ -152,8 +152,8 @@
           "brightness(1) blur(0px) drop-shadow(0 0 30px rgba(0,243,255,0.8))",
         ],
         duration: 500,
-        easing: "easeOutExpo",
-        begin() {
+        ease: "outExpo",
+        onBegin() {
           if (logoImg) logoImg.style.visibility = "visible";
         },
       },
@@ -162,8 +162,8 @@
 
     // Subtle horizontal screen shake on impact
     tl.add(
+      overlay,
       {
-        targets: overlay,
         translateX: [
           { value: 12, duration: 30 },
           { value: -12, duration: 30 },
@@ -171,19 +171,19 @@
           { value: -6, duration: 30 },
           { value: 0, duration: 30 },
         ],
-        easing: "steps(1)",
+        ease: "linear",
       },
       500,
     );
 
     // Glow orb settles to idle state
     tl.add(
+      glowOrb,
       {
-        targets: glowOrb,
         scale: [1.3, 1],
         opacity: [0.8, 0.5],
         duration: 600,
-        easing: "easeOutQuad",
+        ease: "outQuad",
       },
       600,
     );
@@ -192,12 +192,12 @@
 
     // Start continuous particle emitter after impact
     tl.add(
+      particleBox,
       {
-        targets: particleBox,
         opacity: [0, 1],
         duration: 200,
-        easing: "linear",
-        begin() {
+        ease: "linear",
+        onBegin() {
           startParticleEmitter();
         },
       },
@@ -206,20 +206,20 @@
 
     // Title container slides up and fades in
     tl.add(
+      titleWrap,
       {
-        targets: titleWrap,
         opacity: [0, 1],
         translateY: [20, 0],
         duration: 500,
-        easing: "easeOutCubic",
-        begin() {
+        ease: "outCubic",
+        onBegin() {
           if (titleEl) scrambleDecode(titleEl, TITLE, 40);
         },
       },
       1000,
     );
 
-    tl.finished.then(() => playIdle());
+    // tl.finished removed because we added onComplete above
   }
 
   /* ── Continuous particle emitter (halftone dots) ── */
@@ -245,7 +245,9 @@
       p.style.setProperty("--pcolor", color);
       particleBox.appendChild(p);
       setTimeout(() => p.remove(), dur + 50);
-    }, 16);
+    },
+      16
+    );
     activeIntervals.push(emitInterval as any);
   }
 
@@ -257,8 +259,7 @@
 
     // Gentle logo breathing glow
     idleAnims.push(
-      anime({
-        targets: logoImg,
+      animate(logoImg, {
         filter: [
           "drop-shadow(0 0 20px rgba(0,243,255,0.7)) drop-shadow(0 0 60px rgba(0,243,255,0.3))",
           "drop-shadow(0 0 30px rgba(0,243,255,0.9)) drop-shadow(0 0 80px rgba(0,243,255,0.5))",
@@ -266,45 +267,42 @@
         duration: 2000,
         direction: "alternate",
         loop: true,
-        easing: "easeInOutSine",
+        ease: "inOutSine",
       }),
     );
 
     // Very subtle scale breathe
     idleAnims.push(
-      anime({
-        targets: logoImg,
+      animate(logoImg, {
         scale: [1, 1.015],
         duration: 2500,
         direction: "alternate",
         loop: true,
-        easing: "easeInOutSine",
+        ease: "inOutSine",
       }),
     );
 
     // Background glow pulses
     idleAnims.push(
-      anime({
-        targets: glowOrb,
+      animate(glowOrb, {
         scale: [1, 1.1],
         opacity: [0.5, 0.65],
         duration: 3000,
         direction: "alternate",
         loop: true,
-        easing: "easeInOutSine",
+        ease: "inOutSine",
       }),
     );
 
     // Periodic scan line sweep
     idleAnims.push(
-      anime({
-        targets: scanLine,
+      animate(scanLine, {
         top: ["-5%", "105%"],
         opacity: [0, 0.6, 0.6, 0],
         duration: 1500,
         delay: 4000,
         loop: true,
-        easing: "linear",
+        ease: "linear",
       }),
     );
 
@@ -413,16 +411,16 @@
 
     // ─── 3. THE WIPE (overlay opacity stutter + cleanup) ───
     // This runs concurrently via anime.js while the rAF loop does the chaos
-    const tl = anime.timeline({ autoplay: true });
+    const tl = createTimeline({ autoplay: true });
 
     // Master container violently stutters down: 1 → 0.2 → 0.9 → 0
     tl.add(
+      overlay,
       {
-        targets: overlay,
         opacity: [1, 0.2, 0.9, 0.15, 0.8, 0],
         duration: OVERLOAD_MS,
-        easing: "steps(6)",
-        complete() {
+        ease: "linear",
+        onComplete() {
           if (overlay) overlay.style.display = "none";
           document.body.style.overflow = "";
           ui.finishIntro();
@@ -434,19 +432,12 @@
 
     // Rings, scan-lines, particles pop out of existence instantly
     tl.add(
+      [ringInner, ringOuter, scanLine, streakLine, glowOrb, particleBox],
       {
-        targets: [
-          ringInner,
-          ringOuter,
-          scanLine,
-          streakLine,
-          glowOrb,
-          particleBox,
-        ],
         opacity: 0,
         scale: 1.5,
         duration: 150,
-        easing: "easeOutExpo",
+        ease: "outExpo",
       },
       0,
     );
@@ -460,15 +451,15 @@
 
     // Set initial states
     if (logoImg) logoImg.style.visibility = "hidden";
-    anime.set(logoImg, { opacity: 0, scale: 1.15 });
-    anime.set(flashLayer, { opacity: 0 });
-    anime.set(glowOrb, { opacity: 0, scale: 0 });
-    anime.set(streakLine, { opacity: 0 });
-    anime.set(titleWrap, { opacity: 0 });
-    anime.set([ringInner, ringOuter], { scale: 0, opacity: 0 });
-    anime.set(scanLine, { opacity: 0 });
-    anime.set(particleBox, { opacity: 0 });
-    anime.set([chromaR, chromaB], { opacity: 0 });
+    animeSet(logoImg, { opacity: 0, scale: 1.15 });
+    animeSet(flashLayer, { opacity: 0 });
+    animeSet(glowOrb, { opacity: 0, scale: 0 });
+    animeSet(streakLine, { opacity: 0 });
+    animeSet(titleWrap, { opacity: 0 });
+    animeSet([ringInner, ringOuter], { scale: 0, opacity: 0 });
+    animeSet(scanLine, { opacity: 0 });
+    animeSet(particleBox, { opacity: 0 });
+    animeSet([chromaR, chromaB], { opacity: 0 });
 
     playAppear();
 

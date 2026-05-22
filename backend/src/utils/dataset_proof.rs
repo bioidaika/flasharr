@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::utils::parser::FilenameParser;
-    use crate::utils::smart_tokenizer::{smart_parse, MediaType};
+    use crate::utils::smart_tokenizer::smart_parse;
     use std::collections::HashMap;
 
     /// Proof 1: Manual Search Quality (Dataset 1 - Doraemon Movies)
@@ -36,7 +36,7 @@ mod tests {
         let mut old_clean_count = 0;
         let mut new_clean_count = 0;
 
-        for (filename, expected_clean, expected_dirty) in test_cases {
+        for (filename, expected_clean, _expected_dirty) in test_cases {
             let old = FilenameParser::parse(filename);
             let new = smart_parse(filename);
 
@@ -101,7 +101,7 @@ mod tests {
         let mut title_consistency_old = HashMap::new();
         let mut title_consistency_new = HashMap::new();
 
-        for (filename, expected_season, expected_episode) in &test_cases {
+        for (filename, _expected_season, expected_episode) in &test_cases {
             let old = FilenameParser::parse(filename);
             let new = smart_parse(filename);
 

@@ -158,6 +158,106 @@ impl DownloadOrchestrator {
             let handle = self.spawn_worker(worker_id);
             workers.push(handle);
         }
+
+        // Background sweep: retry COMPLETED tasks that weren't moved to the arr library
+        // (arr_announced=false). Runs every 5 minutes to auto-recover from transient move failures.
+        {
+            let arr_client_s = Arc::clone(&self.arr_client);
+            let db_s = self.db.clone();
+            let task_manager_s = Arc::clone(&self.task_manager);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+                interval.tick().await; // skip initial immediate tick
+                loop {
+                    interval.tick().await;
+                    let unannounced: Vec<DownloadTask> = if let Some(ref db) = db_s {
+                        match db.get_tasks_by_states_async(vec!["COMPLETED".to_string()]).await {
+                            Ok(tasks) => tasks.into_iter()
+                                .filter(|t| !t.arr_announced && t.tmdb_id.is_some())
+                                .collect(),
+                            Err(e) => {
+                                tracing::warn!("Arr sweep: DB error: {}", e);
+                                vec![]
+                            }
+                        }
+                    } else {
+                        task_manager_s.get_tasks().await.into_iter()
+                            .filter(|t| t.state == DownloadState::Completed && !t.arr_announced && t.tmdb_id.is_some())
+                            .collect()
+                    };
+
+                    if unannounced.is_empty() {
+                        continue;
+                    }
+                    tracing::info!("Arr sweep: {} unannounced completed task(s) — retrying move", unannounced.len());
+                    for task in &unannounced {
+                        // The engine may have remapped /downloads/ to appData/downloads/ during
+                        // download (when /downloads was not writable). task.destination stores the
+                        // pre-remap path. Try the stored path first, then the remapped equivalent.
+                        let effective_destination = {
+                            let stored = std::path::Path::new(&task.destination);
+                            if tokio::fs::metadata(stored).await.is_ok() {
+                                Some(task.destination.clone())
+                            } else if task.destination.starts_with("/downloads") {
+                                let app_data_dir = std::env::var("FLASHARR_APPDATA_DIR")
+                                    .map(std::path::PathBuf::from)
+                                    .unwrap_or_else(|_| std::path::PathBuf::from("appData"));
+                                let rel = task.destination.trim_start_matches("/downloads");
+                                let remapped = app_data_dir.join("downloads").join(rel.trim_start_matches('/'));
+                                if tokio::fs::metadata(&remapped).await.is_ok() {
+                                    tracing::info!(
+                                        "Arr sweep: task {} — found at remapped path {:?} (stored path {:?} missing)",
+                                        task.id, remapped, task.destination
+                                    );
+                                    Some(remapped.to_string_lossy().to_string())
+                                } else {
+                                    tracing::warn!(
+                                        "Arr sweep: task {} — file not found at stored {:?} or remapped {:?}, skipping",
+                                        task.id, task.destination, remapped
+                                    );
+                                    None
+                                }
+                            } else {
+                                // File is gone from downloads — Sonarr/Radarr already imported it
+                                // via SABnzbd history. Pass the task through so move_to_arr_path
+                                // can trigger a RescanSeries and set arr_announced=true.
+                                tracing::info!(
+                                    "Arr sweep: task {} — file not found at {:?}, assuming arr imported; handing off for rescan",
+                                    task.id, task.destination
+                                );
+                                Some(task.destination.clone())
+                            }
+                        };
+
+                        let effective_destination = match effective_destination {
+                            Some(d) => d,
+                            None => continue,
+                        };
+
+                        // Build a task view with the resolved destination for move_to_arr_path
+                        let resolved_task = if effective_destination != task.destination {
+                            let mut t = task.clone();
+                            t.destination = effective_destination;
+                            t
+                        } else {
+                            task.clone()
+                        };
+
+                        if let Some(updated) = Self::move_to_arr_path(&resolved_task, &arr_client_s).await {
+                            task_manager_s.update_task(updated.clone()).await;
+                            if let Some(ref db) = db_s {
+                                let _ = db.save_task(&updated);
+                            }
+                        } else {
+                            tracing::error!(
+                                "Arr sweep: move_to_arr_path returned None for task {} (tmdb_id={:?}, dest={})",
+                                task.id, task.tmdb_id, resolved_task.destination
+                            );
+                        }
+                    }
+                }
+            });
+        }
     }
     
     /// Stop orchestrator
@@ -215,7 +315,7 @@ impl DownloadOrchestrator {
         
         // Check for duplicates in memory first (fast path)
         if let Some(code) = &fshare_code {
-            if let Some(existing) = self.find_task_by_fshare_code(code) {
+            if let Some(existing) = self.find_task_by_fshare_code(code).await {
                 let filename = filename_override.unwrap_or_else(|| "unknown".to_string());
                 return self.handle_duplicate(existing, url, filename, host, category, code.clone()).await;
             }
@@ -264,7 +364,7 @@ impl DownloadOrchestrator {
         }
         
         // Fetch real filename and size from Fshare API
-        let (filename, file_size) = if let Some(handler) = self.host_registry.get_handler(&host) {
+        let (mut filename, file_size) = if let Some(handler) = self.host_registry.get_handler(&host) {
             match handler.get_file_info(&url).await {
                 Ok(file_info) => {
                     tracing::info!("Fetched file info from API: name='{}', size={}", file_info.filename, file_info.size);
@@ -282,6 +382,11 @@ impl DownloadOrchestrator {
             let final_name = filename_override.unwrap_or_else(|| url.split('/').last().unwrap_or("unknown").to_string());
             (final_name, 0u64)
         };
+
+        // Trim leading slash to prevent Path::join from treating it as an absolute path
+        if filename.starts_with('/') {
+            filename = filename.trim_start_matches('/').to_string();
+        }
         
         // Build destination path based on TMDB metadata
         let download_dir = {
@@ -290,11 +395,15 @@ impl DownloadOrchestrator {
         
         // Create Sonarr/Radarr compatible filename if TMDB metadata exists
         let final_filename = if let Some(mut meta) = tmdb_metadata.clone() {
-            // Extract file extension from original filename
-            let extension = std::path::Path::new(&filename)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("mkv");
+            // Extract file extension from original filename; normalize community tags
+            // like ".Flasharr" (Fshare uploader convention) to ".mkv" so Sonarr/Radarr
+            // recognise the file.
+            let extension = PathBuilder::normalize_video_extension(
+                std::path::Path::new(&filename)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("mkv"),
+            );
             
             // For TV shows: Always create clean filename if we have season/episode
             if let (Some(season), Some(episode)) = (meta.season, meta.episode) {
@@ -316,9 +425,13 @@ impl DownloadOrchestrator {
                     meta.title.clone()
                 };
                 
-                // Create clean filename: "Series - S##E##.ext"
+                // Create clean filename: "Series (Year) - S##E##.ext"
                 if let Some(title_str) = title {
-                    let clean_filename = format!("{} - S{:02}E{:02}.{}", title_str, season, episode, extension);
+                    let clean_filename = if let Some(year) = meta.year {
+                        format!("{} ({}) - S{:02}E{:02}.{}", title_str, year, season, episode, extension)
+                    } else {
+                        format!("{} - S{:02}E{:02}.{}", title_str, season, episode, extension)
+                    };
                     tracing::info!("Generated clean filename: {} (from: {})", clean_filename, filename);
                     
                     // Update tmdb_metadata with fetched title for folder organization
@@ -372,10 +485,15 @@ impl DownloadOrchestrator {
             task.quality, task.resolution
         );
         
-        // Store TMDB metadata for Sonarr/Radarr matching
         if let Some(ref meta) = tmdb_metadata {
             task.tmdb_id = meta.tmdb_id;
+            
+            // Always store the series/movie title in tmdb_title — it is the key used by
+            // sabnzbd.rs to report a parseable name to Sonarr (e.g. "How.Dare.You.S01E03.WEB-DL.Flasharr").
+            // Season/episode numbers are tracked separately in tmdb_season/tmdb_episode.
+            // Setting this to "Episode X" caused "Series title mismatch" import failures.
             task.tmdb_title = meta.title.clone();
+            
             task.tmdb_season = meta.season.map(|s| s as u32);
             task.tmdb_episode = meta.episode.map(|e| e as u32);
             
@@ -423,8 +541,8 @@ impl DownloadOrchestrator {
         }
         
         // Add to manager (SSOT)
-        self.task_manager.add_task(task.clone());
-        
+        self.task_manager.add_task(task.clone()).await;
+
         // Wake idle workers
         self.task_notify.notify_waiters();
         
@@ -509,14 +627,14 @@ impl DownloadOrchestrator {
                                         
                                         // Update in-memory tasks with arr_series_id/arr_movie_id
                                         if let Some(tmdb_id) = task_clone.tmdb_id {
-                                            let all_tasks = task_manager_clone.get_tasks();
+                                            let all_tasks = task_manager_clone.get_tasks().await;
                                             let mut updated_count = 0;
-                                            
+
                                             for mut task in all_tasks {
                                                 if task.tmdb_id == Some(tmdb_id) {
                                                     // Update appropriate ID based on media type
                                                     match task.detect_media_type() {
-                                                        crate::downloader::MediaType::TvSeries | 
+                                                        crate::downloader::MediaType::TvSeries |
                                                         crate::downloader::MediaType::TvEpisode => {
                                                             task.arr_series_id = Some(arr_id as i64);
                                                         }
@@ -524,7 +642,7 @@ impl DownloadOrchestrator {
                                                             task.arr_movie_id = Some(arr_id as i64);
                                                         }
                                                     }
-                                                    task_manager_clone.update_task(task);
+                                                    task_manager_clone.update_task(task).await;
                                                     updated_count += 1;
                                                 }
                                             }
@@ -605,8 +723,8 @@ impl DownloadOrchestrator {
     
     /// Find task by Fshare code
     /// Delegates to DuplicateDetector module
-    fn find_task_by_fshare_code(&self, code: &str) -> Option<DownloadTask> {
-        DuplicateDetector::find_task_by_fshare_code(&self.task_manager, code)
+    async fn find_task_by_fshare_code(&self, code: &str) -> Option<DownloadTask> {
+        DuplicateDetector::find_task_by_fshare_code(&self.task_manager, code).await
     }
     
     /// Handle duplicate download based on existing task state
@@ -644,8 +762,8 @@ impl DownloadOrchestrator {
                 );
                 
                 // Delete old task (this will also delete the file)
-                self.task_manager.delete_task(existing.id);
-                
+                self.task_manager.delete_task(existing.id).await;
+
                 // Delete from database
                 if let Some(db) = &self.db {
                     let _ = db.delete_task(existing.id);
@@ -663,8 +781,8 @@ impl DownloadOrchestrator {
                 task.resolution = quality_attrs.resolution.clone();
                 
                 // Add to manager
-                self.task_manager.add_task(task.clone());
-                
+                self.task_manager.add_task(task.clone()).await;
+
                 // Persist to database
                 if let Some(db) = &self.db {
                     db.save_task(&task)?;
@@ -702,27 +820,95 @@ impl DownloadOrchestrator {
         &self.task_manager
     }
 
+    /// Re-process all COMPLETED downloads that haven't been linked to Sonarr/Radarr.
+    /// For each completed task: looks up the arr path, creates a symlink, triggers rescan.
+    /// Returns a list of (task_id, filename, status_message) tuples.
+    pub async fn backfill_arr_paths(&self) -> Vec<(String, String, String)> {
+        let mut results = Vec::new();
+
+        // Get all completed tasks from DB
+        let completed_tasks = if let Some(db) = &self.db {
+            match db.get_tasks_by_states_async(vec!["COMPLETED".to_string()]).await {
+                Ok(tasks) => tasks,
+                Err(e) => {
+                    tracing::error!("Backfill: Failed to load completed tasks: {}", e);
+                    return vec![("".into(), "".into(), format!("DB error: {}", e))];
+                }
+            }
+        } else {
+            // Fallback to in-memory tasks
+            self.task_manager.get_tasks().await.into_iter()
+                .filter(|t| t.state == DownloadState::Completed)
+                .collect()
+        };
+
+        tracing::info!("Backfill: Processing {} completed tasks", completed_tasks.len());
+
+        for task in &completed_tasks {
+            let task_id = task.id.to_string();
+            let filename = task.filename.clone();
+
+            // Skip tasks that don't have TMDB metadata (can't look up arr path)
+            if task.tmdb_id.is_none() {
+                results.push((task_id, filename, "skipped: no tmdb_id".into()));
+                continue;
+            }
+
+            // Check if source file exists at current destination
+            let source = std::path::Path::new(&task.destination);
+            let source_exists = tokio::fs::metadata(source).await.is_ok();
+            let source_is_symlink = tokio::fs::symlink_metadata(source).await
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+
+            if !source_exists && !source_is_symlink {
+                // File doesn't exist at recorded destination — check if it's already at arr path
+                results.push((task_id, filename, format!("skipped: file not found at {}", task.destination)));
+                continue;
+            }
+
+            // Try to move/symlink to arr path
+            match Self::move_to_arr_path(task, &self.arr_client).await {
+                Some(updated_task) => {
+                    // Update in task manager and DB
+                    self.task_manager.update_task(updated_task.clone()).await;
+                    if let Some(db) = &self.db {
+                        let _ = db.save_task(&updated_task);
+                    }
+                    results.push((task_id, filename, format!("linked to {}", updated_task.destination)));
+                }
+                None => {
+                    // move_to_arr_path returned None — could be already at target, not in arr, etc.
+                    results.push((task_id, filename, "skipped: arr lookup failed or already at target".into()));
+                }
+            }
+        }
+
+        tracing::info!("Backfill: Completed. {} tasks processed", results.len());
+        results
+    }
+
     /// Get aggregate engine statistics (with database counts for filter dropdown)
     pub async fn get_stats(&self) -> EngineStats {
-        let mut stats = self.task_manager.get_stats();
-        
+        let mut stats = self.task_manager.get_stats().await;
+
         // Query database for accurate status counts (for filter dropdown)
         if let Some(db) = &self.db {
             match db.get_status_counts() {
                 Ok(counts) => {
                     use crate::downloader::stats::DbStatusCounts;
-                    
+
                     // Aggregate counts by UI category
-                    let downloading = *counts.get("DOWNLOADING").unwrap_or(&0) 
+                    let downloading = *counts.get("DOWNLOADING").unwrap_or(&0)
                         + *counts.get("STARTING").unwrap_or(&0);
-                    let queued = *counts.get("QUEUED").unwrap_or(&0) 
+                    let queued = *counts.get("QUEUED").unwrap_or(&0)
                         + *counts.get("WAITING").unwrap_or(&0);
                     let paused = *counts.get("PAUSED").unwrap_or(&0);
                     let completed = *counts.get("COMPLETED").unwrap_or(&0);
                     let failed = *counts.get("FAILED").unwrap_or(&0);
                     let cancelled = *counts.get("CANCELLED").unwrap_or(&0);
                     let all: usize = counts.values().sum();
-                    
+
                     stats.db_counts = Some(DbStatusCounts {
                         all,
                         downloading,
@@ -738,7 +924,7 @@ impl DownloadOrchestrator {
                 }
             }
         }
-        
+
         stats
     }
     
@@ -818,7 +1004,7 @@ impl DownloadOrchestrator {
     /// but not in the active TaskManager (e.g., completed tasks, tasks from before restart).
     pub async fn get_task_unified(&self, task_id: uuid::Uuid) -> Option<DownloadTask> {
         // Fast path: check memory first
-        if let Some(task) = self.task_manager.get_task(task_id) {
+        if let Some(task) = self.task_manager.get_task(task_id).await {
             tracing::trace!("Task {} found in TaskManager (cache hit)", task_id);
             return Some(task);
         }
@@ -862,9 +1048,9 @@ impl DownloadOrchestrator {
         
         match db.get_tasks_by_states_async(states).await {
             Ok(tasks) => {
-                let count = self.task_manager.restore_tasks(tasks);
+                let count = self.task_manager.restore_tasks(tasks).await;
                 tracing::info!("Loaded {} pending tasks from database into TaskManager", count);
-                
+
                 // Wake workers to process any queued tasks
                 if count > 0 {
                     self.wake_workers();
@@ -989,13 +1175,13 @@ impl DownloadOrchestrator {
         // 3. Update TaskManager and broadcast for each task
         for task in tasks {
             // Try to pause in TaskManager (for active downloads)
-            if let Some(paused_task) = self.task_manager.pause_task(task.id) {
+            if let Some(paused_task) = self.task_manager.pause_task(task.id).await {
                 self.broadcast_task_update(&paused_task);
             } else {
                 // Task was only in DB (queued), add to TaskManager and broadcast
                 let mut paused = task.clone();
                 paused.state = DownloadState::Paused;
-                self.task_manager.add_task(paused.clone());
+                self.task_manager.add_task(paused.clone()).await;
                 self.broadcast_task_update(&paused);
             }
         }
@@ -1045,10 +1231,10 @@ impl DownloadOrchestrator {
         for task in tasks {
             let mut queued_task = task.clone();
             queued_task.state = DownloadState::Queued;
-            
+
             // Add to TaskManager so workers can pick it up
-            self.task_manager.add_task(queued_task.clone());
-            
+            self.task_manager.add_task(queued_task.clone()).await;
+
             // Broadcast the state change
             self.broadcast_task_update(&queued_task);
         }
@@ -1059,7 +1245,82 @@ impl DownloadOrchestrator {
         tracing::info!("Resumed {} tasks atomically", affected);
         affected
     }
+
+    /// Re-download a task using its original data
+    pub async fn redownload_task(&self, task_id: uuid::Uuid) -> Result<DownloadTask, anyhow::Error> {
+        let mut task = self.get_task_unified(task_id).await
+            .ok_or_else(|| anyhow::anyhow!("Task not found"))?;
+
+        tracing::info!("Re-download requested for task {} ({})", task.filename, task.id);
+
+        // 1. Delete existing files to force a fresh start
+        let dest_path = std::path::PathBuf::from(&task.destination);
+        if dest_path.exists() {
+            if let Err(e) = tokio::fs::remove_file(&dest_path).await {
+                tracing::warn!("Failed to delete existing file during re-download: {}", e);
+            } else {
+                tracing::info!("Deleted existing file: {:?}", dest_path);
+            }
+        }
+        
+        // Also delete potential partial file (.flasharr)
+        let temp_path = dest_path.with_extension(
+            format!("{}.flasharr", dest_path.extension().and_then(|e| e.to_str()).unwrap_or(""))
+        );
+        if temp_path.exists() {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+        }
+
+        // 2. Reset task state
+        task.state = DownloadState::Queued;
+        task.progress = 0.0;
+        task.downloaded = 0;
+        task.speed = 0.0;
+        task.eta = 0.0;
+        task.retry_count = 0;
+        task.error_message = None;
+        task.wait_until = None;
+        task.started_at = None;
+        task.completed_at = None;
+        task.url = task.original_url.clone(); // Force re-resolution
+        task.url_metadata = None;
+        task.cancel_token = tokio_util::sync::CancellationToken::new();
+
+        // 3. Update memory and DB
+        self.task_manager.add_task(task.clone()).await;
+        if let Some(db) = &self.db {
+            db.save_task(&task)?;
+        }
+
+        // 4. Broadcast and notify
+        self.broadcast_task_update(&task);
+        self.wake_workers();
+
+        Ok(task)
+    }
     
+    /// Re-download all tasks in a batch
+    pub async fn redownload_batch_async(&self, batch_id: String) -> crate::error::FlasharrResult<usize> {
+        let db = self.db.as_ref().ok_or_else(|| crate::error::FlasharrError::DatabaseConnection("No database connection".to_string()))?;
+        
+        // 1. Get all tasks for this batch
+        let tasks: Vec<DownloadTask> = db.get_tasks_by_batch_id_async(batch_id).await?;
+        if tasks.is_empty() {
+            return Ok(0);
+        }
+
+        let total = tasks.len();
+        
+        // 2. Trigger redownload for each task
+        for task in tasks {
+            // We can ignore errors for individual tasks in a batch re-download
+            // to allow as many as possible to restart
+            let _ = self.redownload_task(task.id).await;
+        }
+
+        Ok(total)
+    }
+
     /// Spawn a worker
     fn spawn_worker(&self, worker_id: usize) -> JoinHandle<()> {
         let running = self.running.clone();
@@ -1089,7 +1350,7 @@ impl DownloadOrchestrator {
                 }
                 
                 // Get next queued task
-                if let Some(task) = task_manager.pop_next_queued() {
+                if let Some(task) = task_manager.pop_next_queued().await {
                     tracing::info!("Worker {}: Processing task {}", worker_id, task.id);
                     
                     // Acquire locks for current config and engine
@@ -1142,7 +1403,7 @@ impl DownloadOrchestrator {
         // Update state to Starting
         task.state = DownloadState::Starting;
         task.started_at = Some(Utc::now());
-        task_manager.update_task(task.clone());
+        task_manager.update_task(task.clone()).await;
         
         // Publish StateChanged event (QUEUED -> STARTING)
         event_bus.publish(super::events::TaskEvent::StateChanged {
@@ -1167,12 +1428,12 @@ impl DownloadOrchestrator {
                             resolved_at: Utc::now(),
                             expires_at: Utc::now() + chrono::Duration::hours(6),
                         });
-                        task_manager.update_task(task.clone());
+                        task_manager.update_task(task.clone()).await;
                         resolved.direct_url
                     }
                     Err(e) => {
                         tracing::error!("Worker {}: Failed to resolve URL: {}", worker_id, e);
-                        task_manager.mark_failed(task.id, format!("URL resolution failed: {}", e));
+                        task_manager.mark_failed(task.id, format!("URL resolution failed: {}", e)).await;
                         
                         // Broadcast FAILED state to WebSocket
                         let _ = progress_tx.send(ProgressUpdate {
@@ -1187,7 +1448,7 @@ impl DownloadOrchestrator {
                         });
                         
                         if let Some(db) = db {
-                            if let Some(failed_task) = task_manager.get_task(task.id) {
+                            if let Some(failed_task) = task_manager.get_task(task.id).await {
                                 let _ = db.save_task(&failed_task);
                             }
                         }
@@ -1203,8 +1464,8 @@ impl DownloadOrchestrator {
         
         // Update state to Downloading
         task.state = DownloadState::Downloading;
-        task_manager.update_task(task.clone());
-        
+        task_manager.update_task(task.clone()).await;
+
         // Download the file
         let destination = PathBuf::from(&task.destination);
         let task_id = task.id;
@@ -1219,15 +1480,18 @@ impl DownloadOrchestrator {
             &destination,
             move |progress| {
                 // Update ALL progress fields in one atomic operation to prevent flickering
-                task_manager_clone.update_task_progress(
-                    task_id,
-                    progress.downloaded_bytes,
-                    progress.total_bytes,
-                    progress.speed_bytes_per_sec,
-                    progress.eta_seconds,
-                    progress.percentage as f32,
-                );
-                
+                let task_manager = task_manager_clone.clone();
+                tokio::spawn(async move {
+                    task_manager.update_task_progress(
+                        task_id,
+                        progress.downloaded_bytes,
+                        progress.total_bytes,
+                        progress.speed_bytes_per_sec,
+                        progress.eta_seconds,
+                        progress.percentage as f32,
+                    ).await;
+                });
+
                 // Broadcast progress (WebSocket handler will just read the task, not update again)
                 let _ = progress_tx_clone.send(ProgressUpdate {
                     event: TaskEvent::Updated,
@@ -1245,26 +1509,38 @@ impl DownloadOrchestrator {
         
         // Handle result
         match result {
-            Ok(()) => {
-                tracing::info!("Worker {}: Download completed for {}", worker_id, task_id);
-                task_manager.mark_completed(task_id);
-                
+            Ok(actual_path) => {
+                tracing::info!("Worker {}: Download completed for {} at {:?}", worker_id, task_id, actual_path);
+                // Persist the actual path the engine used (engine may have remapped /downloads/
+                // to appData/downloads/ when /downloads was not writable). Without this update,
+                // the background sweep checks task.destination which doesn't exist and silently
+                // skips the task every 5 minutes, leaving arr_announced=false forever.
+                task.destination = actual_path.to_string_lossy().to_string();
+                task_manager.update_task(task.clone()).await;
+                task_manager.mark_completed(task_id).await;
+
                 // Post-completion: Move file to Sonarr/Radarr's series/movie folder
                 // This allows Sonarr/Radarr's disk scan to detect and import the file
-                if let Some(completed_task) = task_manager.get_task(task_id) {
+                if let Some(completed_task) = task_manager.get_task(task_id).await {
                     let moved_task = Self::move_to_arr_path(
                         &completed_task,
                         arr_client,
                     ).await;
-                    
+
                     // Update task with new destination if file was moved
                     if let Some(updated_task) = moved_task {
-                        task_manager.update_task(updated_task.clone());
+                        task_manager.update_task(updated_task.clone()).await;
                         if let Some(db) = db {
                             let _ = db.save_task(&updated_task);
                         }
-                    } else if let Some(db) = db {
-                        let _ = db.save_task(&completed_task);
+                    } else {
+                        tracing::error!(
+                            "Worker {}: move_to_arr_path returned None for {} (tmdb_id={:?}, dest={})",
+                            worker_id, task_id, completed_task.tmdb_id, completed_task.destination
+                        );
+                        if let Some(db) = db {
+                            let _ = db.save_task(&completed_task);
+                        }
                     }
                 }
                 
@@ -1285,7 +1561,7 @@ impl DownloadOrchestrator {
                 
                 // Check if this was a pause action (task state is already Paused)
                 // In this case, we should NOT retry or mark as failed
-                if let Some(task) = task_manager.get_task(task_id) {
+                if let Some(task) = task_manager.get_task(task_id).await {
                     if task.state == DownloadState::Paused {
                         tracing::info!("Worker {}: Download paused for {} (by user request)", worker_id, task_id);
                         
@@ -1312,14 +1588,14 @@ impl DownloadOrchestrator {
                 // Check if user cancelled (not paused)
                 if cancel_token.is_cancelled() {
                     // Check one more time if it was paused
-                    if let Some(task) = task_manager.get_task(task_id) {
+                    if let Some(task) = task_manager.get_task(task_id).await {
                         if task.state == DownloadState::Paused {
                             return; // Already handled above
                         }
                     }
                     
                     // True cancellation (delete/stop), not pause
-                    task_manager.mark_failed(task_id, "Download cancelled".to_string());
+                    task_manager.mark_failed(task_id, "Download cancelled".to_string()).await;
                     
                     let _ = progress_tx.send(ProgressUpdate {
                         event: TaskEvent::Updated,
@@ -1333,13 +1609,13 @@ impl DownloadOrchestrator {
                     });
                     
                     if let Some(db) = db {
-                        if let Some(updated_task) = task_manager.get_task(task_id) {
+                        if let Some(updated_task) = task_manager.get_task(task_id).await {
                             let _ = db.save_task(&updated_task);
                         }
                     }
                     return;
                 }
-                
+
                 // ── Intelligent error classification ──────────────────────────
                 // Use ErrorClassifier to determine the correct recovery strategy
                 // instead of blindly retrying everything with the same config.
@@ -1351,7 +1627,7 @@ impl DownloadOrchestrator {
                     worker_id, task_id, category, error_string
                 );
                 
-                if let Some(mut task) = task_manager.get_task(task_id) {
+                if let Some(mut task) = task_manager.get_task(task_id).await {
                     match category {
                         // ── URL expired: refresh the VIP link and try again ──
                         ErrorCategory::UrlRefreshNeeded { max_retries, reason } => {
@@ -1368,7 +1644,7 @@ impl DownloadOrchestrator {
                                     "Link expired ({}/{}): {reason} — getting fresh URL",
                                     task.retry_count, max_retries
                                 ));
-                                task_manager.update_task(task.clone());
+                                task_manager.update_task(task.clone()).await;
                                 tracing::info!(
                                     "Worker {}: URL refresh needed for {} — will re-resolve in 3s (attempt {}/{})",
                                     worker_id, task_id, task.retry_count, max_retries
@@ -1394,7 +1670,7 @@ impl DownloadOrchestrator {
                                 task.error_message = Some(format!(
                                     "Retry {}/{}: {reason}", task.retry_count, max_retries
                                 ));
-                                task_manager.update_task(task.clone());
+                                task_manager.update_task(task.clone()).await;
                                 tracing::warn!(
                                     "Worker {}: Retryable error for {} in {}ms (attempt {}/{}): {}",
                                     worker_id, task_id, delay_ms, task.retry_count, max_retries, reason
@@ -1429,7 +1705,7 @@ impl DownloadOrchestrator {
                                     "System issue ({}/{}): {reason} — Tip: {fix_suggestion}",
                                     task.retry_count, max_retries
                                 ));
-                                task_manager.update_task(task.clone());
+                                task_manager.update_task(task.clone()).await;
                                 tracing::warn!(
                                     "Worker {}: System issue for {} (attempt {}/{}): {} — {}",
                                     worker_id, task_id, task.retry_count, max_retries, reason, fix_suggestion
@@ -1442,7 +1718,7 @@ impl DownloadOrchestrator {
                     }
                     
                     if let Some(db) = db {
-                        if let Some(updated_task) = task_manager.get_task(task_id) {
+                        if let Some(updated_task) = task_manager.get_task(task_id).await {
                             let _ = db.save_task(&updated_task);
                         }
                     }
@@ -1451,7 +1727,7 @@ impl DownloadOrchestrator {
         }
     }
 
-    
+
     /// Calculate retry delay with exponential backoff
     fn calculate_retry_delay_static(retry_count: u32, config: &DownloadConfig) -> Duration {
         let base_delay = config.retry.base_delay_ms as u64;
@@ -1471,7 +1747,7 @@ impl DownloadOrchestrator {
         db: Option<&Arc<Db>>,
     ) {
         tracing::error!("Worker {}: Permanently failing task {}: {}", worker_id, task_id, message);
-        task_manager.mark_failed(task_id, message);
+        task_manager.mark_failed(task_id, message).await;
 
         let _ = progress_tx.send(ProgressUpdate {
             event: TaskEvent::Updated,
@@ -1485,7 +1761,7 @@ impl DownloadOrchestrator {
         });
 
         if let Some(db) = db {
-            if let Some(failed_task) = task_manager.get_task(task_id) {
+            if let Some(failed_task) = task_manager.get_task(task_id).await {
                 let _ = db.save_task(&failed_task);
             }
         }
@@ -1506,22 +1782,22 @@ impl DownloadOrchestrator {
                         // Resume interrupted downloads as QUEUED
                         let mut resumed_task = task.clone();
                         resumed_task.state = DownloadState::Queued;
-                        self.task_manager.add_task(resumed_task);
+                        self.task_manager.add_task(resumed_task).await;
                         restored_count += 1;
                     }
                     DownloadState::Queued | DownloadState::Waiting => {
                         // Re-queue pending downloads
-                        self.task_manager.add_task(task);
+                        self.task_manager.add_task(task).await;
                         restored_count += 1;
                     }
                     _ => {
                         // Keep other states as-is
-                        self.task_manager.add_task(task);
+                        self.task_manager.add_task(task).await;
                         restored_count += 1;
                     }
                 }
             }
-            
+
             tracing::info!("Restored {} tasks from database", restored_count);
         }
         
@@ -1581,8 +1857,10 @@ impl DownloadOrchestrator {
     }
 
     
-    /// Move completed download to Sonarr/Radarr's series/movie folder
-    /// Returns updated task if file was moved successfully, None otherwise
+    /// Symlink completed download into Sonarr/Radarr's series/movie folder.
+    /// The source file stays in the downloads directory; a symlink is placed
+    /// at the arr library path so Sonarr/Radarr (and Jellyfin) can find it.
+    /// Returns updated task with the symlink path as destination.
     async fn move_to_arr_path(
         task: &DownloadTask,
         arr_client: &Arc<tokio::sync::RwLock<Option<Arc<crate::arr::ArrClient>>>>,
@@ -1612,8 +1890,23 @@ impl DownloadOrchestrator {
                                 id as i64
                             }
                             Ok(None) => {
-                                tracing::warn!("Series not found in Sonarr for TMDB {}", tmdb_id);
-                                return None;
+                                // Safety net: artifact manager should have added this at grab time.
+                                // If missing, auto-add now as fallback.
+                                tracing::warn!("Series not in Sonarr for TMDB {} (artifact manager missed?) — auto-adding as fallback", tmdb_id);
+                                let root_path = match client.get_sonarr_root_folders().await {
+                                    Ok(folders) => folders.first().map(|f| f.path.clone()).unwrap_or_else(|| "/data/media/tv".to_string()),
+                                    Err(_) => "/data/media/tv".to_string(),
+                                };
+                                match client.add_series_by_tmdb(tmdb_id, 1, &root_path).await {
+                                    Ok(id) => {
+                                        tracing::info!("Fallback: added series to Sonarr TMDB {} -> ID {}", tmdb_id, id);
+                                        id as i64
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Fallback: failed to add series to Sonarr for TMDB {}: {}", tmdb_id, e);
+                                        return None;
+                                    }
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!("Failed to look up series by TMDB {}: {}", tmdb_id, e);
@@ -1643,8 +1936,23 @@ impl DownloadOrchestrator {
                                 id as i64
                             }
                             Ok(None) => {
-                                tracing::warn!("Movie not found in Radarr for TMDB {}", tmdb_id);
-                                return None;
+                                // Safety net: artifact manager should have added this at grab time.
+                                // If missing, auto-add now as fallback.
+                                tracing::warn!("Movie not in Radarr for TMDB {} (artifact manager missed?) — auto-adding as fallback", tmdb_id);
+                                let root_path = match client.get_radarr_root_folders().await {
+                                    Ok(folders) => folders.first().map(|f| f.path.clone()).unwrap_or_else(|| "/data/media/movies".to_string()),
+                                    Err(_) => "/data/media/movies".to_string(),
+                                };
+                                match client.add_movie_by_tmdb(tmdb_id, 1, &root_path).await {
+                                    Ok(id) => {
+                                        tracing::info!("Fallback: added movie to Radarr TMDB {} -> ID {}", tmdb_id, id);
+                                        id as i64
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Fallback: failed to add movie to Radarr for TMDB {}: {}", tmdb_id, e);
+                                        return None;
+                                    }
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!("Failed to look up movie by TMDB {}: {}", tmdb_id, e);
@@ -1671,8 +1979,14 @@ impl DownloadOrchestrator {
         let target_dir = match media_type {
             MediaType::TvSeries | MediaType::TvEpisode => {
                 // TV: {series_path}/Season XX/
-                let season = task.tmdb_season.unwrap_or(1);
-                std::path::PathBuf::from(&arr_folder).join(format!("Season {:02}", season))
+                let season = match task.tmdb_season {
+                    Some(s) => s,
+                    None => {
+                        tracing::warn!("TV task {} has no season number — skipping arr move to prevent Season 1 mislabeling", task.id);
+                        return None;
+                    }
+                };
+                std::path::PathBuf::from(&arr_folder).join(format!("Season {}", season))
             }
             MediaType::Movie => {
                 // Movie: {movie_path}/
@@ -1682,63 +1996,139 @@ impl DownloadOrchestrator {
         
         let target_path = target_dir.join(filename);
         
-        // Don't move if source and target are the same
+        // If source and target are the same, file is already at arr path — just trigger rescan
         if source == target_path {
-            tracing::debug!("File already at target path: {:?}", target_path);
-            return None;
-        }
-        
-        // Create target directory
-        if let Err(e) = tokio::fs::create_dir_all(&target_dir).await {
-            tracing::error!("Failed to create target directory {:?}: {}", target_dir, e);
-            return None;
-        }
-        
-        // Move (rename) file to target
-        tracing::info!(
-            "Moving completed file to arr path: {:?} -> {:?}",
-            source, target_path
-        );
-        
-        // Move file and trigger Arr rescan on success
-        let move_result = match tokio::fs::rename(&source, &target_path).await {
-            Ok(()) => {
-                tracing::info!("Successfully moved file to {:?}", target_path);
-                let mut updated = task.clone();
-                updated.destination = target_path.to_string_lossy().to_string();
-                Some(updated)
-            }
-            Err(e) => {
-                // rename fails across filesystems, fall back to copy+delete
-                tracing::warn!("rename failed (cross-device?): {}, trying copy+delete", e);
-                match tokio::fs::copy(&source, &target_path).await {
-                    Ok(_) => {
-                        let _ = tokio::fs::remove_file(&source).await;
-                        tracing::info!("Successfully copied file to {:?}", target_path);
-                        let mut updated = task.clone();
-                        updated.destination = target_path.to_string_lossy().to_string();
-                        Some(updated)
-                    }
-                    Err(copy_err) => {
-                        tracing::error!("Failed to copy file to {:?}: {}", target_path, copy_err);
-                        None
-                    }
-                }
-            }
-        };
-        
-        // Trigger Arr rescan for instant import (fire-and-forget)
-        if move_result.is_some() {
+                    tracing::info!("File already at target path: {:?} — triggering rescan only", target_path);
             let rescan_result = match media_type {
                 MediaType::TvSeries | MediaType::TvEpisode => {
-                    client.trigger_series_rescan(arr_id).await
+                    client.trigger_series_rescan_with_path(arr_id, Some(target_path.to_str().unwrap_or(""))).await
                 }
                 MediaType::Movie => {
-                    client.trigger_movie_refresh(arr_id).await
+                    client.trigger_movie_refresh_with_path(arr_id, Some(target_path.to_str().unwrap_or(""))).await
                 }
             };
             if let Err(e) = rescan_result {
                 tracing::warn!("Arr rescan trigger failed (non-fatal): {}", e);
+            }
+            
+            // Return updated task even if already there, to ensure announced = true
+            let mut updated = task.clone();
+            updated.arr_announced = true;
+            match media_type {
+                MediaType::TvSeries | MediaType::TvEpisode => updated.arr_series_id = Some(arr_id as i64),
+                MediaType::Movie => updated.arr_movie_id = Some(arr_id as i64),
+            }
+            return Some(updated);
+        }
+
+        // Create target directory
+        if let Err(e) = tokio::fs::create_dir_all(&target_dir).await {
+            // Media path is not mounted in this container (e.g. /data/media not in compose volumes).
+            // Sonarr/Radarr imports the file autonomously via SABnzbd history polling.
+            // Trigger a rescan so arr picks up whatever it already imported, then mark announced.
+            tracing::warn!(
+                "Cannot create target dir {:?}: {} — media path not mounted. \
+                 Trusting arr SABnzbd import; triggering rescan and marking announced.",
+                target_dir, e
+            );
+            let rescan_result = match media_type {
+                MediaType::TvSeries | MediaType::TvEpisode => {
+                    client.trigger_series_rescan_with_path(arr_id, None).await
+                }
+                MediaType::Movie => {
+                    client.trigger_movie_refresh_with_path(arr_id, None).await
+                }
+            };
+            if let Err(re) = rescan_result {
+                tracing::warn!("Arr rescan trigger failed (non-fatal): {}", re);
+            }
+            let mut updated = task.clone();
+            updated.arr_announced = true;
+            match media_type {
+                MediaType::TvSeries | MediaType::TvEpisode => updated.arr_series_id = Some(arr_id as i64),
+                MediaType::Movie => updated.arr_movie_id = Some(arr_id as i64),
+            }
+            return Some(updated);
+        }
+
+        // If a symlink or file already exists at target, remove it first (re-grab scenario)
+        if target_path.exists() || tokio::fs::symlink_metadata(&target_path).await.is_ok() {
+            tracing::info!("Removing existing file/symlink at {:?}", target_path);
+            let _ = tokio::fs::remove_file(&target_path).await;
+        }
+
+        // Move file: target_path -> source (file moves from downloads to library)
+        tracing::info!(
+            "Moving completed file to arr path: {:?} -> {:?}",
+            source, target_path
+        );
+
+        let move_result = match tokio::fs::rename(&source, &target_path).await {
+            Ok(()) => {
+                tracing::info!("Successfully moved {:?} -> {:?}", source, target_path);
+                let mut updated = task.clone();
+                updated.destination = target_path.to_string_lossy().to_string();
+                updated.arr_announced = true;
+                match media_type {
+                    MediaType::TvSeries | MediaType::TvEpisode => updated.arr_series_id = Some(arr_id as i64),
+                    MediaType::Movie => updated.arr_movie_id = Some(arr_id as i64),
+                }
+                Some(updated)
+            }
+            Err(rename_err) => {
+                // If rename fails (e.g. cross-device move or transient permission error after
+                // download completes), retry copy up to 3 times with a 2s delay between each.
+                // Use spawn_blocking+std::fs::copy to avoid copy_file_range failures on LXC/Docker overlays.
+                tracing::warn!("Failed to rename {:?} -> {:?}: {}. Trying copy+remove fallback.", source, target_path, rename_err);
+                let src_buf = source.to_path_buf();
+                let dst_buf = target_path.clone();
+                let mut copy_ok = false;
+                for attempt in 1..=3u32 {
+                    let src2 = src_buf.clone();
+                    let dst2 = dst_buf.clone();
+                    match tokio::task::spawn_blocking(move || std::fs::copy(&src2, &dst2)).await {
+                        Ok(Ok(_)) => { copy_ok = true; break; }
+                        Ok(Err(e)) => {
+                            tracing::warn!("Copy attempt {}/3 {:?}: {}", attempt, src_buf, e);
+                            if attempt < 3 { tokio::time::sleep(std::time::Duration::from_secs(2)).await; }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Copy spawn failed attempt {}/3: {}", attempt, e);
+                            if attempt < 3 { tokio::time::sleep(std::time::Duration::from_secs(2)).await; }
+                        }
+                    }
+                }
+                if copy_ok {
+                    let _ = tokio::fs::remove_file(&source).await;
+                    tracing::info!("Successfully copied and removed {:?} -> {:?}", source, target_path);
+                    let mut updated = task.clone();
+                    updated.destination = target_path.to_string_lossy().to_string();
+                    updated.arr_announced = true;
+                    match media_type {
+                        MediaType::TvSeries | MediaType::TvEpisode => updated.arr_series_id = Some(arr_id as i64),
+                        MediaType::Movie => updated.arr_movie_id = Some(arr_id as i64),
+                    }
+                    Some(updated)
+                } else {
+                    tracing::error!("Failed to move or copy {:?} -> {:?} after 3 attempts", source, target_path);
+                    None
+                }
+            }
+        };
+        
+        // Trigger Arr scan for instant import with the target file path (fire-and-forget)
+        if move_result.is_some() {
+            let target_path_str = target_path.to_str().unwrap_or("");
+            let rescan_result = match media_type {
+                MediaType::TvSeries | MediaType::TvEpisode => {
+                    client.trigger_series_rescan_with_path(arr_id, Some(target_path_str)).await
+                }
+                MediaType::Movie => {
+                    client.trigger_movie_refresh_with_path(arr_id, Some(target_path_str)).await
+                }
+            };
+            if let Err(e) = rescan_result {
+                tracing::warn!("Arr scan trigger failed (non-fatal): {}", e);
             }
         }
         

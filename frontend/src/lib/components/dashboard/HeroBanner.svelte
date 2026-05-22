@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import Badge from "$lib/components/ui/Badge.svelte";
+  import { Badge } from "@media-set/core-ui";
 
   interface TrendingItem {
     id: number;
@@ -108,7 +108,7 @@
               <span class="material-icons">star</span>
               {current.vote_average?.toFixed(1) || "N/A"}
             </span>
-            <span class="type">{current.media_type.toUpperCase()}</span>
+            <Badge text={current.media_type.toUpperCase()} variant="grey" size="xs" noDot />
           </div>
           {#if current.overview}
             <p class="hero-overview">{current.overview}</p>
@@ -215,23 +215,7 @@
     gap: 0.75rem;
   }
 
-  .hero-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.4rem;
-    background: rgba(255, 100, 0, 0.9);
-    color: white;
-    padding: 0.3rem 0.75rem;
-    border-radius: 4px;
-    font-size: 0.65rem;
-    font-weight: 800;
-    letter-spacing: 0.1em;
-    width: fit-content;
-  }
 
-  .hero-badge .material-icons {
-    font-size: 14px;
-  }
 
   .hero-title {
     font-size: 2rem;
@@ -267,14 +251,7 @@
     font-size: 16px;
   }
 
-  .hero-meta .type {
-    background: rgba(255, 255, 255, 0.1);
-    padding: 0.2rem 0.5rem;
-    border-radius: 4px;
-    font-size: 0.7rem;
-    font-weight: 700;
-    color: rgba(255, 255, 255, 0.7);
-  }
+
 
   .hero-overview {
     font-size: 0.85rem;

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import ContentShelf from "./ContentShelf.svelte";
+  import { MediaShelf, MediaCard } from "@media-set/core-ui";
   import {
     fetchHistory,
     fetchAllSeries,
@@ -83,4 +83,23 @@
   });
 </script>
 
-<ContentShelf title="Just Added" {items} {loading} />
+{#if !loading && items.length > 0}
+  <MediaShelf
+    title="Just Added"
+    {items}
+    keyExtractor={(item) => String(item.tmdbId)}
+  >
+    {#snippet card(item, index, isHovered)}
+      <MediaCard
+        title={item.title}
+        imgUrl={item.poster || ''}
+        year={item.year?.toString() || ''}
+        tag={item.type.toUpperCase()}
+        href="/{item.type === 'tv' ? 'tv' : 'movie'}/{item.tmdbId}"
+        badgeText={item.status === 'available' ? 'Available' : ''}
+        badgeVariant={item.status === 'available' ? 'success' : 'default'}
+        {isHovered}
+      />
+    {/snippet}
+  </MediaShelf>
+{/if}

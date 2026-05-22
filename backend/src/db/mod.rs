@@ -3,5 +3,4 @@
 pub mod media;
 pub mod sqlite;
 
-pub use media::{MediaItem, MediaEpisode};
-pub use sqlite::{Db, CachedFolderItem, FolderTmdbMapping};
+pub use sqlite::Db;

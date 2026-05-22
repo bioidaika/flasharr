@@ -6,9 +6,9 @@
   import { onMount } from "svelte";
   import { animeFade, animeSlideDown } from "$lib/animations";
   import { getPosterUrl } from "$lib/services/tmdb";
-  import Badge from "$lib/components/ui/Badge.svelte";
-  import Modal from "$lib/components/ui/Modal.svelte";
-  import Button from "$lib/components/ui/Button.svelte";
+  import { Badge } from "@media-set/core-ui";
+  import { Modal } from "@media-set/core-ui";
+  import { Button } from "@media-set/core-ui";
 
   let loading = $state(true);
   let results = $state<any>(null);
@@ -609,62 +609,8 @@
         <span class="material-icons">error_outline</span>
         <p>{error}</p>
       </div>
-    {:else if results && (results.total_found > 0 || (results.folder_matches && results.folder_matches.length > 0))}
+    {:else if results && results.total_found > 0}
       <div class="results-container">
-        {#if results.folder_matches && results.folder_matches.length > 0}
-          <!-- Folder Cache Matches -->
-          <div class="folder-section">
-            <div class="folder-section-header">
-              <span class="material-icons">folder_special</span>
-              <span class="folder-section-title">Folder Sources</span>
-              <Badge
-                text="{results.folder_matches.length} found"
-                variant="count"
-                size="xs"
-                noDot
-              />
-            </div>
-            <div class="folder-list">
-              {#each results.folder_matches as fm}
-                <a
-                  href={fm.fshare_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="folder-card glass-panel"
-                  class:is-dir={fm.is_directory}
-                >
-                  <div class="folder-icon">
-                    <span class="material-icons"
-                      >{fm.is_directory ? "folder" : "insert_drive_file"}</span
-                    >
-                  </div>
-                  <div class="folder-info">
-                    <div class="folder-name" title={fm.name}>{fm.name}</div>
-                    <div class="folder-meta">
-                      {#if fm.quality && fm.quality !== "Unknown"}
-                        <Badge
-                          text={fm.quality}
-                          variant="quality"
-                          size="xs"
-                          noDot
-                        />
-                      {/if}
-                      {#if fm.year}
-                        <span class="folder-year">{fm.year}</span>
-                      {/if}
-                      {#if fm.size > 0}
-                        <span class="folder-size">{formatSize(fm.size)}</span>
-                      {/if}
-                    </div>
-                  </div>
-                  <span class="material-icons folder-open-icon"
-                    >open_in_new</span
-                  >
-                </a>
-              {/each}
-            </div>
-          </div>
-        {/if}
         {#if results.groups}
           <!-- Movie Layout -->
           {#each results.groups as group}
@@ -791,12 +737,10 @@
                             alt=""
                             class="ep-img"
                           />
-                        {:else}
-                          <div class="thumb-placeholder">
-                            <span class="material-icons">movie</span>
-                          </div>
                         {/if}
-                        <div class="ep-badge">E{ep.episode_number}</div>
+                        <div class="ep-badge-wrapper">
+                          <Badge text="E{ep.episode_number}" variant="episode" size="xs" noDot />
+                        </div>
                         {#if isDownloaded}
                           <div class="downloaded-overlay">
                             <span class="material-icons">check_circle</span>
@@ -1173,112 +1117,6 @@
     gap: 1rem;
   }
 
-  /* Folder Sources Section */
-  .folder-section {
-    margin-bottom: 0.5rem;
-  }
-  .folder-section-header {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0 0.25rem;
-    margin-bottom: 0.75rem;
-    color: rgba(255, 255, 255, 0.7);
-    font-size: 0.8rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-  .folder-section-header .material-icons {
-    font-size: 1.1rem;
-    color: #f59e0b;
-  }
-  .folder-section-title {
-    flex: 1;
-  }
-  .folder-list {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-  }
-  .folder-card {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.75rem 1rem;
-    background: rgba(255, 255, 255, 0.02);
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    border-radius: 10px;
-    text-decoration: none;
-    color: inherit;
-    transition: all 0.2s;
-    cursor: pointer;
-  }
-  .folder-card:hover {
-    background: rgba(255, 255, 255, 0.06);
-    border-color: rgba(245, 158, 11, 0.3);
-    transform: translateX(2px);
-  }
-  .folder-card.is-dir {
-    border-left: 3px solid rgba(245, 158, 11, 0.4);
-  }
-  .folder-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 36px;
-    height: 36px;
-    border-radius: 8px;
-    background: rgba(245, 158, 11, 0.1);
-    flex-shrink: 0;
-  }
-  .folder-icon .material-icons {
-    font-size: 1.2rem;
-    color: #f59e0b;
-  }
-  .folder-card:not(.is-dir) .folder-icon {
-    background: rgba(99, 102, 241, 0.1);
-  }
-  .folder-card:not(.is-dir) .folder-icon .material-icons {
-    color: #818cf8;
-  }
-  .folder-info {
-    flex: 1;
-    min-width: 0;
-  }
-  .folder-name {
-    font-size: 0.82rem;
-    font-weight: 500;
-    color: rgba(255, 255, 255, 0.9);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    line-height: 1.3;
-  }
-  .folder-meta {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin-top: 0.2rem;
-    font-size: 0.72rem;
-    color: rgba(255, 255, 255, 0.4);
-  }
-  .folder-year {
-    color: rgba(255, 255, 255, 0.5);
-  }
-  .folder-size {
-    color: rgba(255, 255, 255, 0.4);
-  }
-  .folder-open-icon {
-    font-size: 1rem;
-    color: rgba(255, 255, 255, 0.2);
-    flex-shrink: 0;
-    transition: color 0.2s;
-  }
-  .folder-card:hover .folder-open-icon {
-    color: #f59e0b;
-  }
-
   .quality-card {
     background: rgba(255, 255, 255, 0.02);
     border: 1px solid rgba(255, 255, 255, 0.05);
@@ -1313,21 +1151,6 @@
     font-weight: 700;
     color: #fff;
     font-size: 1rem;
-  }
-
-  .trigger-right {
-    display: flex;
-    align-items: center;
-    gap: 1.5rem;
-  }
-
-  .count-badge {
-    background: rgba(255, 255, 255, 0.1);
-    padding: 2px 10px;
-    border-radius: 20px;
-    font-size: 0.7rem;
-    font-weight: 700;
-    color: rgba(255, 255, 255, 0.6);
   }
 
   /* Episode Cards */
@@ -1379,18 +1202,6 @@
     text-shadow: 0 0 8px rgba(16, 185, 129, 0.5);
   }
 
-  .downloaded-badge {
-    font-size: 0.55rem;
-    font-weight: 800;
-    letter-spacing: 0.05em;
-    color: #10b981;
-    background: rgba(16, 185, 129, 0.12);
-    border: 1px solid rgba(16, 185, 129, 0.25);
-    padding: 1px 6px;
-    border-radius: 3px;
-    margin-left: 8px;
-  }
-
   .episode-trigger {
     display: flex;
     padding: 0.75rem;
@@ -1423,16 +1234,12 @@
     justify-content: center;
     color: rgba(255, 255, 255, 0.1);
   }
-  .ep-badge {
+
+  .ep-badge-wrapper {
     position: absolute;
     bottom: 4px;
     left: 4px;
-    background: rgba(0, 243, 255, 0.8);
-    color: #000;
-    font-size: 0.6rem;
-    font-weight: 900;
-    padding: 1px 4px;
-    border-radius: 3px;
+    z-index: 2;
   }
 
   .episode-main {
@@ -1523,41 +1330,6 @@
   .badges {
     display: flex;
     gap: 0.4rem;
-  }
-  .status-pill {
-    font-size: 0.55rem;
-    font-weight: 800;
-    padding: 2px 6px;
-    border-radius: 4px;
-    text-transform: uppercase;
-  }
-
-  .status-pill.dub {
-    background: rgba(139, 92, 246, 0.15);
-    color: #a78bfa;
-    border: 1px solid rgba(139, 92, 246, 0.3);
-  }
-  .status-pill.sub {
-    background: rgba(16, 185, 129, 0.15);
-    color: #34d399;
-    border: 1px solid rgba(16, 185, 129, 0.3);
-  }
-  .status-pill.hdr {
-    background: linear-gradient(135deg, #7c3aed, #f43f5e);
-    color: #fff;
-    border: none;
-    box-shadow: 0 0 10px rgba(124, 58, 237, 0.4);
-  }
-  .status-pill.dv {
-    background: linear-gradient(135deg, #f59e0b, #d946ef);
-    color: #fff;
-    border: none;
-  }
-  .status-pill.uhd {
-    background: rgba(0, 243, 255, 0.15);
-    color: var(--color-primary);
-    border: 1px solid rgba(0, 243, 255, 0.3);
-    box-shadow: 0 0 8px rgba(0, 243, 255, 0.2);
   }
 
   .get-btn {
@@ -1770,70 +1542,6 @@
     display: flex;
     gap: 0.4rem;
     flex-wrap: wrap;
-  }
-
-  .tv-badge {
-    font-size: 0.58rem;
-    font-weight: 900;
-    padding: 3px 8px;
-    border-radius: 5px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    transition: all 0.2s ease;
-  }
-
-  .tv-badge.vie {
-    background: linear-gradient(
-      135deg,
-      rgba(139, 92, 246, 0.2) 0%,
-      rgba(167, 139, 250, 0.15) 100%
-    );
-    color: #c4b5fd;
-    border: 1px solid rgba(139, 92, 246, 0.35);
-    box-shadow: 0 0 12px rgba(139, 92, 246, 0.15);
-  }
-
-  .tv-badge.sub {
-    background: linear-gradient(
-      135deg,
-      rgba(16, 185, 129, 0.2) 0%,
-      rgba(52, 211, 153, 0.15) 100%
-    );
-    color: #6ee7b7;
-    border: 1px solid rgba(16, 185, 129, 0.35);
-    box-shadow: 0 0 12px rgba(16, 185, 129, 0.15);
-  }
-
-  .tv-badge.hdr {
-    background: linear-gradient(135deg, #7c3aed 0%, #f43f5e 100%);
-    color: #fff;
-    border: none;
-    box-shadow: 0 0 15px rgba(124, 58, 237, 0.4);
-    animation: badge-glow 2s infinite ease-in-out;
-  }
-
-  .tv-badge.dv {
-    background: linear-gradient(135deg, #f59e0b 0%, #d946ef 100%);
-    color: #fff;
-    border: none;
-    box-shadow: 0 0 15px rgba(217, 70, 239, 0.35);
-  }
-
-  .tv-badge.quality {
-    background: rgba(0, 243, 255, 0.12);
-    color: var(--color-primary);
-    border: 1px solid rgba(0, 243, 255, 0.25);
-    box-shadow: 0 0 10px rgba(0, 243, 255, 0.1);
-  }
-
-  @keyframes badge-glow {
-    0%,
-    100% {
-      filter: brightness(1);
-    }
-    50% {
-      filter: brightness(1.2);
-    }
   }
 
   /* Score Container */

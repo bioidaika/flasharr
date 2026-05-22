@@ -65,6 +65,8 @@ pub struct AppState {
     pub http_client: Arc<reqwest::Client>,
     /// Cache for TimFshare search results (avoids duplicate API calls)
     pub fshare_search_cache: Cache<String, Vec<api::search_pipeline::RawFshareResult>>,
+    pub discovery_service: Arc<services::DiscoveryService>,
+    pub library_sync_service: Arc<services::LibrarySyncService>,
 }
 
 #[derive(Serialize)]
@@ -130,7 +132,7 @@ async fn main() {
     let host_registry = Arc::new(hosts::create_registry(&config, shared_http_client, Arc::clone(&db)));
     
     // Create download config from app config
-    let download_config = downloader::config::DownloadConfig {
+    let mut download_config = downloader::config::DownloadConfig {
         max_concurrent: config.downloads.max_concurrent,
         segments_per_download: config.downloads.segments_per_download as usize,
         download_dir: config.downloads.directory.clone(),
@@ -140,6 +142,47 @@ async fn main() {
         retry_max_wait: 300,
         retry: downloader::config::RetryConfig::default(),
     };
+
+    // V2: Robust Directory Validation for Staging Environments
+    // If the configured download directory is not writable (common with /downloads volume issues),
+    // we fallback to appData/downloads which is guaranteed to be writable and managed by our entrypoint.
+    let app_data_dir = std::env::var("FLASHARR_APPDATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().join("appData"));
+    
+    let current_dir = &download_config.download_dir;
+    let fallback_dir = app_data_dir.join("downloads");
+    
+    let is_not_writable = if !current_dir.exists() {
+        std::fs::create_dir_all(current_dir).is_err()
+    } else {
+        // Try creating a temporary test file
+        let test_file = current_dir.join(format!(".write_test_{}", uuid::Uuid::new_v4().simple()));
+        match std::fs::File::create(&test_file) {
+            Ok(_) => {
+                let _ = std::fs::remove_file(test_file);
+                false
+            },
+            Err(_) => true,
+        }
+    };
+
+    if is_not_writable {
+        tracing::warn!(
+            "Download directory {} is not writable! Falling back to managed appData path: {}",
+            current_dir.display(),
+            fallback_dir.display()
+        );
+        
+        // Ensure fallback directory exists
+        if let Err(e) = std::fs::create_dir_all(&fallback_dir) {
+            tracing::error!("CRITICAL: Failed to create fallback download directory {}: {}", fallback_dir.display(), e);
+        } else {
+            download_config.download_dir = fallback_dir;
+        }
+    } else {
+        tracing::info!("Using download directory: {}", current_dir.display());
+    }
     
     // Load Arr configuration from database (setup wizard saves here)
     // This ensures webhook handler initializes correctly even if settings were saved before
@@ -181,6 +224,9 @@ async fn main() {
         config.radarr.clone()
     };
     
+    // Capture staging dir before download_config is moved into the orchestrator
+    let staging_dir = download_config.download_dir.clone();
+
     // Create download orchestrator with new architecture
     let download_orchestrator = Arc::new(downloader::DownloadOrchestrator::new(
         download_config,
@@ -245,6 +291,25 @@ async fn main() {
     app_config.sonarr = sonarr_config.clone();
     app_config.radarr = radarr_config.clone();
 
+    // Create DiscoveryService
+    let discovery_service = Arc::new(services::DiscoveryService::new(
+        Arc::clone(&db),
+        Arc::clone(&download_orchestrator),
+        Arc::clone(&tmdb_service),
+        Arc::clone(&http_client),
+    ));
+
+    // Create LibrarySyncService (gets client from orchestrator when available)
+    let ar_client = download_orchestrator.get_arr_client().await.unwrap_or_else(|| {
+        // Fallback: create a temporary client if orchestrator's hasn't loaded (unlikely)
+        Arc::new(arr::ArrClient::new(sonarr_config.clone(), radarr_config.clone()))
+    });
+    let library_sync_service = Arc::new(services::LibrarySyncService::new(
+        Arc::clone(&db),
+        ar_client,
+        staging_dir,
+    ));
+
     let state = Arc::new(AppState { 
         host_registry,
         download_orchestrator,
@@ -258,13 +323,17 @@ async fn main() {
         tmdb_cache,
         http_client,
         fshare_search_cache,
+        discovery_service,
+        library_sync_service: Arc::clone(&library_sync_service),
     });
 
     // Build router
-    let app = Router::new()
+    // Web app routes — no key required (served to the browser UI)
+    let app_routes = Router::new()
         .route("/health", get(health))
         .route("/api/health", get(health))
         .route("/api/health/status", get(api::health::health_status))
+        .nest("/api/setup", api::setup::router())
         .route("/api/ws", get(websocket::handler))
         .nest("/api/downloads", api::downloads::router())
         .nest("/api/stats", api::stats::router())
@@ -274,13 +343,24 @@ async fn main() {
         .nest("/api/settings", api::settings::router())
         .nest("/api/tmdb", api::tmdb::router())
         .nest("/api/discovery", api::discovery::router())
-        .nest("/api/setup", api::setup::router())
-        .nest("/sabnzbd", api::sabnzbd::router())
-        .nest("/api/indexer", api::indexer::router())
-        .nest("/newznab/api", api::indexer::router())  // Standard Newznab path
         .nest("/api/arr", api::arr::router())
         .nest("/api/media", api::media::router())
         .nest("/api/folder-source", api::folder_source::router())
+        .route("/sabnzbd", get(api::sabnzbd::handle_get).post(api::sabnzbd::handle_post))
+        .route("/sabnzbd/", get(api::sabnzbd::handle_get).post(api::sabnzbd::handle_post))
+        .route("/sabnzbd/api", get(api::sabnzbd::handle_get).post(api::sabnzbd::handle_post))
+        .route("/sabnzbd/api/", get(api::sabnzbd::handle_get).post(api::sabnzbd::handle_post));
+
+    // External integration routes — require API key (called by Jellyflix/other integrations)
+    let external_routes = Router::new()
+        .nest("/api/indexer", api::indexer::router())
+        .nest("/newznab/api", api::indexer::router())  // Standard Newznab path
+        .nest("/api/auth", api::auth::router())        // Key verification for Jellyflix
+        .layer(axum::middleware::from_fn_with_state(state.clone(), api::auth::auth_middleware));
+
+    let app = Router::new()
+        .merge(app_routes)
+        .merge(external_routes)
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -314,6 +394,19 @@ async fn main() {
                 }
             }
         }
+    });
+
+    // Spawn library background sync (every 6 hours)
+    let sync_service = Arc::clone(&library_sync_service);
+    tokio::spawn(async move {
+        // Initial sync on startup to fix issues immediately
+        tracing::info!("[LIBRARY-SYNC] Starting initial library synchronization");
+        if let Err(e) = sync_service.sync_all().await {
+            tracing::error!("[LIBRARY-SYNC] Initial sync failed: {}", e);
+        }
+        
+        // Then run regular sync
+        sync_service.start_background_sync(6).await;
     });
 
     // Run server

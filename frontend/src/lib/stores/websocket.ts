@@ -256,6 +256,7 @@ class WebSocketClient {
    */
   private log(...args: any[]): void {
     if (this.config.debug) {
+      console.log('[WS]', ...args);
     }
   }
 

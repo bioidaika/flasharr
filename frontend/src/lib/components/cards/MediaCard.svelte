@@ -1,6 +1,6 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
-  import Badge from "../ui/Badge.svelte";
+  import { Badge } from "@media-set/core-ui";
 
   interface Props {
     id: number;
@@ -107,9 +107,7 @@
             <span>{voteAverage?.toFixed(1) || "0.0"}</span>
           </div>
           {#if mediaType}
-            <div class="stat-item type">
-              {mediaType.toUpperCase()}
-            </div>
+            <Badge text={mediaType.toUpperCase()} variant="source" size="xs" noDot />
           {/if}
         </div>
       </div>
@@ -373,13 +371,7 @@
     font-size: 14px;
   }
 
-  .stat-item.type {
-    background: rgba(255, 255, 255, 0.1);
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-size: 0.65rem;
-    letter-spacing: 0.05em;
-  }
+
 
   /* Expandable Area (Inline) */
   .overlay-expand {

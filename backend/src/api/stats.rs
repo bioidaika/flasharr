@@ -21,5 +21,5 @@ pub fn router() -> Router<Arc<AppState>> {
 async fn get_stats(
     State(state): State<Arc<AppState>>,
 ) -> Json<EngineStats> {
-    Json(state.download_orchestrator.task_manager().get_stats())
+    Json(state.download_orchestrator.task_manager().get_stats().await)
 }

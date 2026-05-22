@@ -6,24 +6,25 @@ Flasharr uses WebSocket for real-time updates between the backend and frontend. 
 
 ## Connection
 
-- **Endpoint**: `ws://localhost:8484/api/ws` (or `wss://` for HTTPS)
-- **Auto-reconnect**: Enabled with exponential backoff
+- **Endpoint**: `ws://<host>:8484/api/ws` (or `wss://` for HTTPS)
+- **Auto-reconnect**: Enabled with exponential backoff ($5000ms \times 1.5^n$)
 - **Max reconnect attempts**: 10
 
 ## Message Types
 
 ### SYNC_ALL
 
-Full synchronization of all download tasks.
+Initial synchronization of active tasks.
 
 **Direction**: Backend → Frontend  
-**Frequency**: On initial connection
+**Frequency**: On initial connection  
+**Note**: Only sends tasks in `DOWNLOADING` or `STARTING` states. Completed/Failed history must be loaded via REST API.
 
 ```json
 {
   "type": "SYNC_ALL",
   "tasks": [
-    /* array of DownloadTask */
+    /* array of active DownloadTask */
   ]
 }
 ```
@@ -33,7 +34,7 @@ Full synchronization of all download tasks.
 New download task created.
 
 **Direction**: Backend → Frontend  
-**Frequency**: Immediate (when task is added)
+**Frequency**: Immediate
 
 ```json
 {
@@ -46,32 +47,32 @@ New download task created.
 
 ### TASK_UPDATED
 
-Download task state or progress changed.
+Download task state or progress changed (individual update).
 
 **Direction**: Backend → Frontend  
-**Frequency**: Real-time (as changes occur)
+**Frequency**: Immediate (used for specific state transitions)
 
 ```json
 {
   "type": "TASK_UPDATED",
   "task": {
-    /* Partial DownloadTask with updated fields */
+    /* Full DownloadTask object */
   }
 }
 ```
 
 ### TASK_BATCH_UPDATE
 
-Batch of task updates (optimized for performance).
+Batch of task updates (primary update mechanism).
 
 **Direction**: Backend → Frontend  
-**Frequency**: Every 500ms (for active downloads)
+**Frequency**: Every 500ms (when active tasks exist)
 
 ```json
 {
   "type": "TASK_BATCH_UPDATE",
   "tasks": [
-    /* array of partial DownloadTask updates */
+    /* array of DownloadTask objects */
   ]
 }
 ```
@@ -81,7 +82,7 @@ Batch of task updates (optimized for performance).
 Download task deleted.
 
 **Direction**: Backend → Frontend  
-**Frequency**: Immediate (when task is deleted)
+**Frequency**: Immediate
 
 ```json
 {
@@ -95,7 +96,7 @@ Download task deleted.
 Engine statistics and status counts.
 
 **Direction**: Backend → Frontend  
-**Frequency**: Every 2 seconds
+**Frequency**: Every 2 seconds (only if values have changed)
 
 ```json
 {
@@ -106,9 +107,16 @@ Engine statistics and status counts.
     "completed": 10,
     "failed": 1,
     "paused": 2,
+    "cancelled": 0,
     "total_speed": 5242880,
     "db_counts": {
-      /* database status counts */
+      "all": 100,
+      "downloading": 3,
+      "queued": 5,
+      "paused": 2,
+      "completed": 85,
+      "failed": 5,
+      "cancelled": 0
     }
   }
 }
@@ -118,41 +126,36 @@ Engine statistics and status counts.
 
 The frontend uses a WebSocket client (`websocket.ts`) that:
 
-1. Automatically connects on page load
-2. Registers message handlers for each message type
-3. Updates Svelte stores in real-time
-4. Handles reconnection on disconnect
+1. Automatically connects on page load (using `window.location.host`)
+2. Registers message handlers in the `DownloadStore`
+3. Updates Svelte runes (`$state`) in real-time
+4. Handles reconnection with exponential backoff
 
 ### Batch Updates
 
-When tasks are added/removed from batches:
+When tasks are updated in the batch interval:
 
-- Frontend refetches batch summaries to update grouping
-- Batch items cache is updated in real-time
-- UI reflects changes immediately without manual refresh
+- Frontend updates individual items in the `downloads` Map
+- If the task belongs to a batch, it patches the `batchItems` cache
+- It recalculates live batch metrics (total speed, combined progress) immediately in the UI
 
 ## Performance Optimizations
 
-1. **Batched Updates**: Progress updates are sent in batches every 500ms instead of individually
-2. **Delta Updates**: Only changed fields are sent, not entire task objects
-3. **Selective Refetch**: Batch summaries are only refetched when structure changes (add/remove)
+1. **Batched Updates**: Progress and state updates are collected and sent every 500ms to reduce UI re-renders and network overhead.
+2. **Task Filtering**: Only tasks that have actually changed since the last tick are included in the batch update.
+3. **Lazy Stats**: Engine statistics are only broadcast if the values have actually changed.
+4. **Selective Refetch**: Full server refetches (e.g. for batch summaries) are only triggered for terminal state changes (`COMPLETED`, `FAILED`).
 
 ## Troubleshooting
 
 ### Connection Issues
 
-- Check backend is running on correct port (8484)
-- Verify WebSocket endpoint is accessible
-- Check browser console for connection errors
+- Check backend is running on port 8484
+- Verify WebSocket endpoint is accessible (check for `Upgrade: websocket` headers)
+- Check browser console for `[WS]` logs (enabled by default)
 
 ### Missing Updates
 
-- Verify WebSocket connection status in UI
-- Check backend logs for broadcast errors
-- Ensure message handlers are registered
-
-### Performance Issues
-
-- Monitor batch update frequency (should be ~500ms)
-- Check for excessive refetch calls
-- Verify delta updates are working correctly
+- Verify WebSocket connection status in the UI indicator
+- Check if the task is in an "Active" state (only active tasks are synced on connect)
+- For historical tasks, ensure you are not filtered to "Active" only in the UI

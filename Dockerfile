@@ -17,8 +17,8 @@ WORKDIR /build
 
 # ── Planner stage: compute the dependency recipe ─────────────────────────────
 FROM chef AS planner
-COPY backend/Cargo.toml backend/Cargo.lock ./
-COPY backend/src ./src
+COPY flasharr/backend/Cargo.toml flasharr/backend/Cargo.lock ./
+COPY flasharr/backend/src ./src
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ── Backend builder: cook deps (cached unless Cargo.toml/lock change) ─────────
@@ -30,8 +30,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo chef cook --release --recipe-path recipe.json
 
 # Now copy real source and do the final incremental compile (just flasharr crate)
-COPY backend/Cargo.toml backend/Cargo.lock ./
-COPY backend/src ./src
+COPY flasharr/backend/Cargo.toml flasharr/backend/Cargo.lock ./
+COPY flasharr/backend/src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     cargo build --release && \
@@ -49,16 +49,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-# Cache dependencies
-COPY frontend/package*.json ./
+# Copy core-ui shared package
+COPY core-ui/ /build/core-ui/
+
+# Cache dependencies — rewrite workspace dep to local file ref
+COPY flasharr/frontend/package.json ./
+RUN sed -i 's|"@media-set/core-ui": "\*"|"@media-set/core-ui": "file:./core-ui"|' package.json
 RUN --mount=type=cache,target=/root/.npm \
-    npm ci
+    npm install --prefer-offline
 
 # Rebuild native modules for current platform (fixes lightningcss issue)
 RUN npm rebuild lightningcss --platform=linux --arch=x64
 
 # Build frontend
-COPY frontend/ ./
+COPY flasharr/frontend/ ./
 RUN npm run build
 
 # Final runtime stage
@@ -109,7 +113,7 @@ RUN mkdir -p /appData/config /appData/data /appData/downloads /appData/logs && \
     chown -R flasharr:flasharr /appData /app
 
 # Copy entrypoint script
-COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+COPY flasharr/docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
 
 # Note: Container starts as root, entrypoint fixes volume permissions

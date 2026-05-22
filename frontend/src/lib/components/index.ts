@@ -1,14 +1,11 @@
-// Card Components
+// Card Components — local wrappers (TMDB-specific, NOT the core-ui MediaCard)
 export { default as MediaCard } from './cards/MediaCard.svelte';
 export { default as SearchResultCard } from './cards/SearchResultCard.svelte';
 export { default as SkeletonCard } from './cards/SkeletonCard.svelte';
 
-// UI Components
-export { default as Badge } from './ui/Badge.svelte';
-export { default as Button } from './ui/Button.svelte';
-export { default as UserAvatar } from './ui/UserAvatar.svelte';
+// UI Components — re-exported from @media-set/core-ui (local ui/ files removed)
+export { Badge, Button, UserAvatar, ErrorState, Modal } from '@media-set/core-ui';
 export { default as IdentityCard } from './ui/IdentityCard.svelte';
-export { default as ErrorState } from './ui/ErrorState.svelte';
 export { default as IntroOverlay } from './ui/IntroOverlay.svelte';
 
 // Dashboard Components
@@ -21,15 +18,14 @@ export { default as LibraryWidget } from './dashboard/LibraryWidget.svelte';
 export { default as MediaDetailHero } from './media/MediaDetailHero.svelte';
 export { default as RelatedMediaSection } from './media/RelatedMediaSection.svelte';
 
-// Modal Components
-export { default as Modal } from './ui/Modal.svelte';
+// Modal Components — Modal re-exported from core-ui above
 export { default as SwitchAccountModal } from './SwitchAccountModal.svelte';
 export { default as AddDownloadModal } from './AddDownloadModal.svelte';
 export { default as SmartSearchModal } from './SmartSearchModal.svelte';
 export { default as SmartGrabModal } from './SmartGrabModal.svelte';
 export { default as AccountWarningModal } from './AccountWarningModal.svelte';
 
-// Notification Components
+// Notification Components — Flasharr-specific Toasts (uses $lib/stores/toasts)
 export { default as Toasts } from './Toasts.svelte';
 
 // Shared / Visual Components

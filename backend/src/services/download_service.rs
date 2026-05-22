@@ -46,34 +46,37 @@ impl DownloadService {
     }
     
     /// Pause a single task
-    pub fn pause_task(&self, id: Uuid) -> FlasharrResult<DownloadTask> {
+    pub async fn pause_task(&self, id: Uuid) -> FlasharrResult<DownloadTask> {
         self.orchestrator
             .task_manager()
             .pause_task(id)
+            .await
             .ok_or(FlasharrError::DownloadInvalidState {
                 id,
                 expected: "DOWNLOADING/QUEUED".to_string(),
                 actual: "unknown".to_string(),
             })
     }
-    
+
     /// Resume a single task
-    pub fn resume_task(&self, id: Uuid) -> FlasharrResult<DownloadTask> {
+    pub async fn resume_task(&self, id: Uuid) -> FlasharrResult<DownloadTask> {
         self.orchestrator
             .task_manager()
             .resume_task(id)
+            .await
             .ok_or(FlasharrError::DownloadInvalidState {
                 id,
                 expected: "PAUSED".to_string(),
                 actual: "unknown".to_string(),
             })
     }
-    
+
     /// Retry a failed task
-    pub fn retry_task(&self, id: Uuid) -> FlasharrResult<DownloadTask> {
+    pub async fn retry_task(&self, id: Uuid) -> FlasharrResult<DownloadTask> {
         self.orchestrator
             .task_manager()
             .retry_task(id)
+            .await
             .ok_or(FlasharrError::DownloadInvalidState {
                 id,
                 expected: "FAILED/CANCELLED".to_string(),
@@ -82,8 +85,8 @@ impl DownloadService {
     }
     
     /// Delete a task
-    pub fn delete_task(&self, id: Uuid) -> FlasharrResult<()> {
-        let deleted = self.orchestrator.task_manager().delete_task(id);
+    pub async fn delete_task(&self, id: Uuid) -> FlasharrResult<()> {
+        let deleted = self.orchestrator.task_manager().delete_task(id).await;
         if deleted {
             // Also delete from database
             if let Err(e) = self.db.delete_task(id) {
@@ -110,8 +113,8 @@ impl DownloadService {
         if tasks.is_empty() {
             return Err(FlasharrError::BatchNotFound(batch_id.to_string()));
         }
-        
-        Ok(self.merge_realtime_progress(tasks))
+
+        Ok(self.merge_realtime_progress(tasks).await)
     }
     
     /// Get batch statistics
@@ -154,14 +157,14 @@ impl DownloadService {
         let mut affected = 0;
         for task in tasks {
             if pauseable_ids.contains(&task.id) {
-                if let Some(paused_task) = self.orchestrator.task_manager().pause_task(task.id) {
+                if let Some(paused_task) = self.orchestrator.task_manager().pause_task(task.id).await {
                     self.orchestrator.broadcast_task_update(&paused_task);
                     affected += 1;
                 } else {
                     // Task not in memory, add it as paused
                     let mut paused = task.clone();
                     paused.state = DownloadState::Paused;
-                    self.orchestrator.task_manager().add_task(paused.clone());
+                    self.orchestrator.task_manager().add_task(paused.clone()).await;
                     self.orchestrator.broadcast_task_update(&paused);
                     affected += 1;
                 }
@@ -202,7 +205,7 @@ impl DownloadService {
         let mut affected = 0;
         for task in tasks {
             if resumable_ids.contains(&task.id) {
-                affected += self.resume_single_task_for_batch(&task);
+                affected += self.resume_single_task_for_batch(&task).await;
             }
         }
         
@@ -222,7 +225,7 @@ impl DownloadService {
         // Delete from TaskManager
         let mut affected = 0;
         for task in &tasks {
-            if self.orchestrator.task_manager().delete_task(task.id) {
+            if self.orchestrator.task_manager().delete_task(task.id).await {
                 affected += 1;
             }
         }
@@ -255,9 +258,9 @@ impl DownloadService {
     // =========================================================================
     
     /// Merge real-time progress from active tasks into a list of tasks
-    pub fn merge_realtime_progress(&self, mut tasks: Vec<DownloadTask>) -> Vec<DownloadTask> {
-        let active_tasks = self.orchestrator.task_manager().get_active_tasks();
-        
+    pub async fn merge_realtime_progress(&self, mut tasks: Vec<DownloadTask>) -> Vec<DownloadTask> {
+        let active_tasks = self.orchestrator.task_manager().get_active_tasks().await;
+
         for task in tasks.iter_mut() {
             if let Some(active) = active_tasks.iter().find(|t| t.id == task.id) {
                 task.progress = active.progress;
@@ -267,14 +270,14 @@ impl DownloadService {
                 task.state = active.state;
             }
         }
-        
+
         tasks
     }
     
     /// Helper for resuming a single task during batch resume
-    fn resume_single_task_for_batch(&self, task: &DownloadTask) -> usize {
+    async fn resume_single_task_for_batch(&self, task: &DownloadTask) -> usize {
         if task.state == DownloadState::Paused {
-            if let Some(resumed_task) = self.orchestrator.task_manager().resume_task(task.id) {
+            if let Some(resumed_task) = self.orchestrator.task_manager().resume_task(task.id).await {
                 self.orchestrator.broadcast_task_update(&resumed_task);
                 return 1;
             } else {
@@ -282,12 +285,12 @@ impl DownloadService {
                 let mut resumed = task.clone();
                 resumed.state = DownloadState::Queued;
                 resumed.cancel_token = tokio_util::sync::CancellationToken::new();
-                self.orchestrator.task_manager().add_task(resumed.clone());
+                self.orchestrator.task_manager().add_task(resumed.clone()).await;
                 self.orchestrator.broadcast_task_update(&resumed);
                 return 1;
             }
         } else if task.state.can_retry() && task.state != DownloadState::Completed {
-            if let Some(retried_task) = self.orchestrator.task_manager().retry_task(task.id) {
+            if let Some(retried_task) = self.orchestrator.task_manager().retry_task(task.id).await {
                 self.orchestrator.broadcast_task_update(&retried_task);
                 return 1;
             } else {
@@ -296,7 +299,7 @@ impl DownloadService {
                 retried.state = DownloadState::Queued;
                 retried.retry_count += 1;
                 retried.error_message = None;
-                self.orchestrator.task_manager().add_task(retried.clone());
+                self.orchestrator.task_manager().add_task(retried.clone()).await;
                 self.orchestrator.broadcast_task_update(&retried);
                 return 1;
             }

@@ -22,6 +22,12 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/", post(handle_post))
         .route("/api", get(handle_get))
         .route("/api", post(handle_post))
+        .fallback(handle_fallback)
+}
+
+async fn handle_fallback(State(state): State<Arc<AppState>>, Query(params): Query<SabParams>) -> axum::response::Response {
+    tracing::info!("SABnzbd API fallback handler - mode: {}", params.mode.as_deref().unwrap_or("queue"));
+    handle_get(State(state), Query(params)).await
 }
 
 // ============================================================================
@@ -29,7 +35,7 @@ pub fn router() -> Router<Arc<AppState>> {
 // ============================================================================
 
 #[derive(Deserialize)]
-struct SabParams {
+pub struct SabParams {
     mode: Option<String>,
     #[allow(dead_code)]
     output: Option<String>,
@@ -47,7 +53,7 @@ struct SabParams {
 struct SabQueueSlot {
     nzo_id: String,
     filename: String,
-    percentage: String,
+    percentage: u32,
     mb: String,
     mbleft: String,
     status: String,
@@ -70,7 +76,7 @@ struct SabHistorySlot {
 // ============================================================================
 
 /// Handle GET requests (query params)
-async fn handle_get(
+pub async fn handle_get(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SabParams>,
 ) -> axum::response::Response {
@@ -109,7 +115,7 @@ async fn handle_get(
 }
 
 /// Handle POST requests (form data or multipart)
-async fn handle_post(
+pub async fn handle_post(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SabParams>,
     mut multipart: Option<axum::extract::Multipart>,
@@ -192,20 +198,20 @@ async fn handle_add_file(
                 // Parse tmdb_id as i64
                 let tmdb_id_i64 = id.parse::<i64>().ok();
                 
-                // Fetch series title from TMDB for proper folder organization
-                let title = if let Some(tmdb_id_val) = &tmdb_id {
-                    crate::api::indexer::fetch_tmdb_title(tmdb_id_val, "tv").await
+            // Fetch series title AND release year from TMDB for proper folder/filename organization
+                let (title, year) = if let Some(tmdb_id_val) = &tmdb_id {
+                    crate::api::indexer::fetch_tmdb_title_and_year(tmdb_id_val, "tv").await
                 } else {
-                    None
+                    (None, None)
                 };
                 
-                tracing::info!("SABnzbd: Fetched TMDB title: {:?}", title);
+                tracing::info!("SABnzbd: Fetched TMDB title: {:?}, year: {:?}", title, year);
                 
                 Some(crate::downloader::TmdbDownloadMetadata {
                     tmdb_id: tmdb_id_i64,
                     media_type: Some("tv".to_string()),
                     title, // Use fetched title for proper folder structure
-                    year: None,
+                    year,  // Use fetched year for consistent filename format
                     collection_name: None,
                     season: Some(s as i32),
                     episode: Some(e as i32),
@@ -310,7 +316,7 @@ async fn handle_add_url(
 
 /// Get queue status
 async fn handle_queue(state: Arc<AppState>) -> Result<Json<serde_json::Value>, StatusCode> {
-    let tasks = state.download_orchestrator.task_manager().get_tasks();
+    let tasks = state.download_orchestrator.task_manager().get_tasks().await;
     
     let mut total_speed = 0.0;
     let mut total_size = 0u64;
@@ -340,7 +346,7 @@ async fn handle_queue(state: Arc<AppState>) -> Result<Json<serde_json::Value>, S
             SabQueueSlot {
                 nzo_id: t.id.to_string(),
                 filename: t.filename.clone(),
-                percentage: format!("{:.1}", t.progress),
+                percentage: t.progress as u32,
                 mb: format!("{:.2}", t.size as f64 / 1_048_576.0),
                 mbleft: format!("{:.2}", left as f64 / 1_048_576.0),
                 status: format!("{:?}", t.state),
@@ -348,7 +354,7 @@ async fn handle_queue(state: Arc<AppState>) -> Result<Json<serde_json::Value>, S
             }
         })
         .collect();
-    
+
     Ok(Json(serde_json::json!({
         "queue": {
             "paused": false,
@@ -364,7 +370,7 @@ async fn handle_queue(state: Arc<AppState>) -> Result<Json<serde_json::Value>, S
 
 /// Get full status (flattened queue response for *arr compatibility)
 async fn handle_fullstatus(state: Arc<AppState>) -> Result<Json<serde_json::Value>, StatusCode> {
-    let tasks = state.download_orchestrator.task_manager().get_tasks();
+    let tasks = state.download_orchestrator.task_manager().get_tasks().await;
     
     let mut total_speed = 0.0;
     let mut total_size = 0u64;
@@ -390,7 +396,7 @@ async fn handle_fullstatus(state: Arc<AppState>) -> Result<Json<serde_json::Valu
             SabQueueSlot {
                 nzo_id: t.id.to_string(),
                 filename: t.filename.clone(),
-                percentage: format!("{:.1}", t.progress),
+                percentage: t.progress as u32,
                 mb: format!("{:.2}", t.size as f64 / 1_048_576.0),
                 mbleft: format!("{:.2}", left as f64 / 1_048_576.0),
                 status: format!("{:?}", t.state),
@@ -398,7 +404,7 @@ async fn handle_fullstatus(state: Arc<AppState>) -> Result<Json<serde_json::Valu
             }
         })
         .collect();
-    
+
     Ok(Json(serde_json::json!({
         "status": {
             "state": if slots.is_empty() { "Idle" } else { "Downloading" },
@@ -413,12 +419,12 @@ async fn handle_fullstatus(state: Arc<AppState>) -> Result<Json<serde_json::Valu
 }
 
 /// Get history
-/// 
+///
 /// Returns completed/failed downloads for Sonarr/Radarr to detect and import.
 /// Uses TMDB title for the `name` field so *arr can match to series/movies in its library.
 /// Only returns items where the file actually exists on disk.
 async fn handle_history(state: Arc<AppState>) -> Result<Json<serde_json::Value>, StatusCode> {
-    let tasks = state.download_orchestrator.task_manager().get_tasks();
+    let tasks = state.download_orchestrator.task_manager().get_tasks().await;
     
     let slots: Vec<SabHistorySlot> = tasks.iter()
         .filter(|t| matches!(t.state, 
@@ -441,17 +447,27 @@ async fn handle_history(state: Arc<AppState>) -> Result<Json<serde_json::Value>,
                 return None;
             }
 
-            // Map container path to Sonarr path.
-            // Flasharr container:  /downloads/Show/ep.mkv
-            // Sonarr (LXC 110):   /data/downloads/Show/ep.mkv  (has /data → /data)
-            let sonarr_path = if t.destination.starts_with("/downloads/") {
-                // Container-internal path → prefix with /data
-                format!("/data{}", t.destination)
-            } else if t.destination.starts_with("/data/downloads/") {
-                // Already the correct Sonarr-visible path (tasks added post-fix)
+            // Map container path to Sonarr/Radarr-visible path.
+            //
+            // Three cases:
+            // 1. /appData/downloads/... → /data/flasharr-download/...
+            //    (file is still in staging, not yet moved to library)
+            // 2. /data/flasharr-download/... → unchanged
+            //    (already the host-side staging path)
+            // 3. /data/media/... → unchanged
+            //    (file was moved to library by move_to_arr_path; Sonarr/Radarr can see it directly)
+            // 4. /downloads/... → /data/flasharr-download/...
+            //    (legacy compat for old tasks)
+            let sonarr_path = if t.destination.starts_with("/appData/downloads/") {
+                t.destination.replace("/appData/downloads/", "/data/flasharr-download/")
+            } else if t.destination.starts_with("/data/flasharr-download/") {
                 t.destination.clone()
+            } else if t.destination.starts_with("/data/media/") {
+                // File already imported into library — pass through as-is
+                t.destination.clone()
+            } else if t.destination.starts_with("/downloads/") {
+                t.destination.replace("/downloads/", "/data/flasharr-download/")
             } else {
-                // Unknown path — log and skip so Sonarr doesn't get a garbage path
                 tracing::warn!(
                     "SABnzbd history: unexpected destination path for {}: {}",
                     t.filename, t.destination
@@ -582,10 +598,10 @@ async fn handle_pause(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     if let Some(nzo_id) = params.nzo_id {
         if let Ok(uuid) = uuid::Uuid::parse_str(&nzo_id) {
-            state.download_orchestrator.task_manager().pause_task(uuid);
+            let _ = state.download_orchestrator.task_manager().pause_task(uuid).await;
         }
     }
-    
+
     Ok(Json(serde_json::json!({ "status": true })))
 }
 
@@ -596,10 +612,10 @@ async fn handle_resume(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     if let Some(nzo_id) = params.nzo_id {
         if let Ok(uuid) = uuid::Uuid::parse_str(&nzo_id) {
-            state.download_orchestrator.task_manager().resume_task(uuid);
+            let _ = state.download_orchestrator.task_manager().resume_task(uuid).await;
         }
     }
-    
+
     Ok(Json(serde_json::json!({ "status": true })))
 }
 
@@ -610,9 +626,9 @@ async fn handle_delete(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     if let Some(nzo_id) = params.nzo_id {
         if let Ok(uuid) = uuid::Uuid::parse_str(&nzo_id) {
-            state.download_orchestrator.task_manager().delete_task(uuid);
+            let _ = state.download_orchestrator.task_manager().delete_task(uuid).await;
         }
     }
-    
+
     Ok(Json(serde_json::json!({ "status": true })))
 }

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { fetchCalendar, type CalendarEntry } from "$lib/stores/arr";
+  import { Badge } from "@media-set/core-ui";
 
   let entries = $state<CalendarEntry[]>([]);
   let loading = $state(true);
@@ -40,9 +41,9 @@
     <div class="entries-list">
       {#each entries as entry}
         <div class="entry-card">
-          <div class="date-badge">
+          <Badge variant="default">
             {formatDate(entry.airDateUtc)}
-          </div>
+          </Badge>
           <div class="entry-info">
             <div class="series-title">
               {entry.series?.title || "Unknown Series"}
@@ -96,23 +97,6 @@
 
   .entry-card:hover {
     background: rgba(255, 255, 255, 0.05);
-  }
-
-  .date-badge {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    width: 40px;
-    height: 40px;
-    background: rgba(255, 255, 255, 0.05);
-    border-radius: 6px;
-    font-size: 0.6rem;
-    font-weight: 800;
-    color: #fff;
-    text-align: center;
-    line-height: 1.2;
-    flex-shrink: 0;
   }
 
   .entry-info {

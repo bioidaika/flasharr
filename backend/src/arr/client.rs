@@ -557,9 +557,16 @@ impl ArrClient {
     // Command Methods (trigger Sonarr/Radarr actions)
     // ============================================================================
 
-    /// Trigger Sonarr to rescan a series folder for new/changed files
-    /// POST /api/v3/command { "name": "RescanSeries", "seriesId": X }
+    /// Trigger Sonarr to rescan its series folder on disk and update its database.
+    /// Uses RescanSeries — correct after moving a file directly into the library path.
+    /// DownloadedEpisodesScan would reject files already inside the library as "not eligible".
     pub async fn trigger_series_rescan(&self, series_id: i64) -> anyhow::Result<()> {
+        self.trigger_series_rescan_with_path(series_id, None).await
+    }
+
+    /// Trigger Sonarr to rescan the series folder. `path` is unused but kept for call-site
+    /// compatibility — Sonarr's RescanSeries operates at series level, not file level.
+    pub async fn trigger_series_rescan_with_path(&self, series_id: i64, _path: Option<&str>) -> anyhow::Result<()> {
         let config = self.sonarr_config.as_ref()
             .ok_or_else(|| anyhow::anyhow!("Sonarr not configured"))?;
 
@@ -586,15 +593,21 @@ impl ArrClient {
         Ok(())
     }
 
-    /// Trigger Radarr to refresh a movie (rescan folder for new/changed files)
-    /// POST /api/v3/command { "name": "RefreshMovie", "movieId": X }
+    /// Trigger Radarr to rescan its movie folder on disk and update its database.
+    /// Uses RescanMovie — correct after moving a file directly into the library path.
     pub async fn trigger_movie_refresh(&self, movie_id: i64) -> anyhow::Result<()> {
+        self.trigger_movie_refresh_with_path(movie_id, None).await
+    }
+
+    /// Trigger Radarr to rescan the movie folder. `path` is unused — RescanMovie operates
+    /// at movie level, not file level.
+    pub async fn trigger_movie_refresh_with_path(&self, movie_id: i64, _path: Option<&str>) -> anyhow::Result<()> {
         let config = self.radarr_config.as_ref()
             .ok_or_else(|| anyhow::anyhow!("Radarr not configured"))?;
 
         let url = format!("{}/api/v3/command", config.url.trim_end_matches('/'));
         let body = serde_json::json!({
-            "name": "RefreshMovie",
+            "name": "RescanMovie",
             "movieId": movie_id
         });
 
@@ -608,10 +621,10 @@ impl ArrClient {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            anyhow::bail!("RefreshMovie failed for movie {}: HTTP {} - {}", movie_id, status, text);
+            anyhow::bail!("RescanMovie failed for movie {}: HTTP {} - {}", movie_id, status, text);
         }
 
-        tracing::info!("Triggered RefreshMovie for movie ID {}", movie_id);
+        tracing::info!("Triggered RescanMovie for movie ID {}", movie_id);
         Ok(())
     }
 
@@ -941,20 +954,6 @@ impl ArrClient {
         // Use TMDB API to get TVDB ID
         use crate::constants::TMDB_API_KEY;
         
-        let url = format!(
-            "https://api.themoviedb.org/3/tv/{}?api_key={}",
-            tmdb_id, TMDB_API_KEY
-        );
-
-        let response = self.http_client.get(&url).send().await?;
-        
-        if !response.status().is_success() {
-            anyhow::bail!("Failed to lookup TMDB ID: HTTP {}", response.status());
-        }
-
-        let _data: serde_json::Value = response.json().await?;
-        
-        // Extract external_ids
         let external_ids_url = format!(
             "https://api.themoviedb.org/3/tv/{}/external_ids?api_key={}",
             tmdb_id, TMDB_API_KEY

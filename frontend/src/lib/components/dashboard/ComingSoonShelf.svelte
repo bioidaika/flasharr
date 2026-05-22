@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import ContentShelf from "./ContentShelf.svelte";
+  import { MediaShelf, MediaCard } from "@media-set/core-ui";
   import { fetchCalendar, getSeriesPoster } from "$lib/stores/arr";
 
   type CalendarItem = {
-    tmdbId: number;
+    tmdbId: number | string;
     type: "tv";
     title: string;
     poster: string | null;
@@ -30,16 +30,16 @@
 
       for (const episode of calendar) {
         // Check if series exists and has tmdbId
-        if (!episode.series || !episode.series.tmdbId) continue;
+        if (!episode.series || !(episode.series as any).tmdbId) continue;
 
-        const tmdbId = episode.series.tmdbId;
+        const tmdbId = (episode.series as any).tmdbId;
         if (!seriesMap.has(tmdbId)) {
           seriesMap.set(tmdbId, {
             tmdbId,
             type: "tv",
             title: episode.series.title || "Unknown Series",
             poster: getSeriesPoster(episode.series),
-            year: episode.series.year || null,
+            year: (episode.series as any).year || null,
             status: episode.hasFile ? "available" : "missing",
             airDate: episode.airDateUtc,
           });
@@ -62,4 +62,23 @@
   });
 </script>
 
-<ContentShelf title="Coming Soon" {items} {loading} />
+{#if !loading && items.length > 0}
+  <MediaShelf
+    title="Coming Soon"
+    {items}
+    keyExtractor={(item) => String(item.tmdbId)}
+  >
+    {#snippet card(item, index, isHovered)}
+      <MediaCard
+        title={item.title}
+        imgUrl={item.poster || ''}
+        year={item.year?.toString() || ''}
+        tag={item.type.toUpperCase()}
+        href="/tv/{item.tmdbId}"
+        badgeText={item.status === 'available' ? 'Available' : 'Missing'}
+        badgeVariant={item.status === 'available' ? 'success' : 'default'}
+        {isHovered}
+      />
+    {/snippet}
+  </MediaShelf>
+{/if}

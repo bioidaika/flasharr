@@ -1,61 +1,57 @@
 # Flasharr API Reference
 
-Complete reference for Flasharr's REST API and WebSocket protocol.
+Complete reference for Flasharr's REST API, integration APIs (Newznab/SABnzbd), and WebSocket protocol.
 
 ## Base URL
 
 ```
-http://localhost:8484/api
+http://<host>:8484/api
 ```
 
 ## Authentication
 
-Currently, Flasharr does not require authentication for local deployments. For production deployments, consider placing behind a reverse proxy with authentication.
+Flasharr uses a single API key for securing external integrations and protected endpoints.
 
-## REST API Endpoints
+- **Header**: `X-Api-Key: your-api-key`
+- **Query Parameter**: `?apikey=your-api-key` (Used primarily for Indexer/SABnzbd compatibility)
 
-### Health Check
-
-**GET** `/health`
-
-Check if the backend is running.
-
-**Response:**
-
-```json
-{
-  "status": "ok"
-}
-```
+*Note: The API key is configured in Settings and stored in the database.*
 
 ---
 
-### Downloads
+## Downloads API (`/api/downloads`)
 
-#### List Downloads
+Manage download tasks, batches, and queue priority.
 
-**GET** `/downloads`
+### List Downloads
 
-Get all download tasks with optional filtering and pagination.
+**GET** `/api/downloads`
+
+Get all download tasks with pagination, sorting, and filtering.
 
 **Query Parameters:**
 
-- `status` (optional): Filter by status (`queued`, `downloading`, `paused`, `completed`, `failed`)
-- `page` (optional): Page number (default: 1)
-- `limit` (optional): Items per page (default: 50)
+- `status` (optional): Filter by `QUEUED`, `DOWNLOADING`, `PAUSED`, `COMPLETED`, `FAILED`.
+- `page` (optional): Page number (1-indexed, default: 1).
+- `limit` (optional): Items per page (default: 20, max: 100).
+- `sort_by` (optional): Sort field (`added`, `status`, `filename`, `size`, `progress`).
+- `sort_dir` (optional): Sort direction (`asc`, `desc`).
 
 **Response:**
 
 ```json
 {
-  "tasks": [
+  "downloads": [
     {
       "id": "uuid",
-      "filename": "example.mkv",
-      "state": "downloading",
+      "filename": "Breaking.Bad.S01E01.mkv",
+      "state": "DOWNLOADING",
       "progress": 45.5,
       "speed": 5242880,
       "eta": 120,
+      "size": 1152921504,
+      "downloaded": 524288000,
+      "category": "tv",
       "batch_id": "uuid",
       "batch_name": "Breaking Bad S01",
       "tmdb_title": "Breaking Bad",
@@ -63,15 +59,17 @@ Get all download tasks with optional filtering and pagination.
       "tmdb_episode": 1
     }
   ],
+  "stats": { /* engine stats */ },
+  "status_counts": { "QUEUED": 5, "DOWNLOADING": 1, ... },
   "total": 100,
   "page": 1,
-  "pages": 2
+  "total_pages": 5
 }
 ```
 
-#### Add Download
+### Add Download
 
-**POST** `/downloads`
+**POST** `/api/downloads`
 
 Add a new download task.
 
@@ -80,465 +78,124 @@ Add a new download task.
 ```json
 {
   "url": "https://fshare.vn/file/...",
+  "filename": "string (optional)",
+  "category": "string (optional)",
   "batch_id": "uuid (optional)",
-  "batch_name": "string (optional)"
-}
-```
-
-**Response:**
-
-```json
-{
-  "id": "uuid",
-  "filename": "example.mkv",
-  "state": "queued"
-}
-```
-
-#### Get Download
-
-**GET** `/downloads/:id`
-
-Get details of a specific download task.
-
-**Response:**
-
-```json
-{
-  "id": "uuid",
-  "filename": "example.mkv",
-  "state": "downloading",
-  "progress": 45.5,
-  "speed": 5242880,
-  "downloaded_bytes": 524288000,
-  "total_bytes": 1152921504,
-  "eta": 120,
-  "created_at": "2026-02-04T10:00:00Z",
-  "started_at": "2026-02-04T10:01:00Z"
-}
-```
-
-#### Pause Download
-
-**POST** `/downloads/:id/pause`
-
-Pause a download task.
-
-**Response:**
-
-```json
-{
-  "id": "uuid",
-  "state": "paused"
-}
-```
-
-#### Resume Download
-
-**POST** `/downloads/:id/resume`
-
-Resume a paused download task.
-
-**Response:**
-
-```json
-{
-  "id": "uuid",
-  "state": "queued"
-}
-```
-
-#### Delete Download
-
-**DELETE** `/downloads/:id`
-
-Delete a download task.
-
-**Response:**
-
-```json
-{
-  "success": true
-}
-```
-
----
-
-### Batches
-
-#### List Batches
-
-**GET** `/batches`
-
-Get all batch summaries.
-
-**Response:**
-
-```json
-{
-  "batches": [
-    {
-      "batch_id": "uuid",
-      "batch_name": "Breaking Bad S01",
-      "total_items": 13,
-      "completed_items": 5,
-      "progress": 38.5,
-      "total_size": 15032385536,
-      "downloaded_size": 5784576000
-    }
-  ]
-}
-```
-
-#### Batch Operations
-
-**POST** `/batches/:batch_id/pause`
-
-Pause all downloads in a batch.
-
-**POST** `/batches/:batch_id/resume`
-
-Resume all downloads in a batch.
-
-**DELETE** `/batches/:batch_id`
-
-Delete all downloads in a batch.
-
----
-
-### Search
-
-#### Smart Search
-
-**POST** `/search/smart`
-
-Search for media using TMDB metadata.
-
-**Request Body:**
-
-```json
-{
-  "title": "Breaking Bad",
-  "year": "2008",
-  "type": "tv",
-  "tmdb_id": "1396",
-  "season": 1
-}
-```
-
-**Response:**
-
-```json
-{
-  "seasons": [
-    {
-      "season": 1,
-      "episodes_grouped": [
-        {
-          "episode_number": 1,
-          "title": "Pilot",
-          "files": [
-            {
-              "url": "https://fshare.vn/file/...",
-              "quality": "1080p",
-              "size": 1152921504
-            }
-          ]
-        }
-      ]
-    }
-  ]
-}
-```
-
-#### Smart Grab
-
-**POST** `/search/smart-grab`
-
-Automatically queue all episodes from a smart search.
-
-**Request Body:**
-
-```json
-{
-  "title": "Breaking Bad",
-  "year": "2008",
-  "type": "tv",
-  "tmdb_id": "1396",
-  "season": 1
-}
-```
-
-**Response:**
-
-```json
-{
-  "batch_id": "uuid",
-  "batch_name": "Breaking Bad S01",
-  "tasks_created": 13
-}
-```
-
----
-
-### Settings
-
-#### Get Settings
-
-**GET** `/settings`
-
-Get current application settings.
-
-**Response:**
-
-```json
-{
-  "max_concurrent_downloads": 5,
-  "download_directory": "/downloads",
-  "fshare_configured": true,
-  "tmdb_configured": true
-}
-```
-
-#### Update Settings
-
-**PUT** `/settings`
-
-Update application settings.
-
-**Request Body:**
-
-```json
-{
-  "max_concurrent_downloads": 3
-}
-```
-
-**Response:**
-
-```json
-{
-  "success": true
-}
-```
-
----
-
-### Engine Stats
-
-**GET** `/engine/stats`
-
-Get download engine statistics.
-
-**Response:**
-
-```json
-{
-  "active_downloads": 3,
-  "queued": 5,
-  "completed": 10,
-  "failed": 1,
-  "paused": 2,
-  "total_speed": 15728640,
-  "db_counts": {
-    "queued": 5,
-    "downloading": 3,
-    "completed": 10,
-    "failed": 1,
-    "paused": 2
+  "batch_name": "string (optional)",
+  "tmdb": {
+    "tmdb_id": 1396,
+    "media_type": "tv",
+    "title": "Breaking Bad",
+    "season": 1,
+    "episode": 1
   }
 }
 ```
 
----
+### Task Operations
 
-## WebSocket API
+- **GET** `/api/downloads/:id`: Get single task details.
+- **POST** `/api/downloads/:id/pause`: Pause task.
+- **POST** `/api/downloads/:id/resume`: Resume task.
+- **POST** `/api/downloads/:id/retry`: Retry failed task.
+- **POST** `/api/downloads/:id/redownload`: Re-download (delete local and restart).
+- **DELETE** `/api/downloads/:id`: Delete task (and optionally files).
 
-### Connection
+### Batch Operations
 
-**Endpoint:** `ws://localhost:8484/api/ws`
-
-### Message Types
-
-All messages follow this format:
-
-```json
-{
-  "type": "MESSAGE_TYPE",
-  "...additional fields"
-}
-```
-
-#### SYNC_ALL
-
-Full synchronization of all tasks (sent on connection).
-
-```json
-{
-  "type": "SYNC_ALL",
-  "tasks": [
-    /* array of DownloadTask */
-  ]
-}
-```
-
-#### TASK_ADDED
-
-New task created.
-
-```json
-{
-  "type": "TASK_ADDED",
-  "task": {
-    /* DownloadTask object */
-  }
-}
-```
-
-#### TASK_UPDATED
-
-Task state or progress changed.
-
-```json
-{
-  "type": "TASK_UPDATED",
-  "task": {
-    "id": "uuid",
-    "state": "downloading",
-    "progress": 45.5,
-    "speed": 5242880
-  }
-}
-```
-
-#### TASK_BATCH_UPDATE
-
-Batch of task updates (sent every 500ms for active downloads).
-
-```json
-{
-  "type": "TASK_BATCH_UPDATE",
-  "tasks": [
-    /* array of partial DownloadTask updates */
-  ]
-}
-```
-
-#### TASK_REMOVED
-
-Task deleted.
-
-```json
-{
-  "type": "TASK_REMOVED",
-  "task_id": "uuid"
-}
-```
-
-#### ENGINE_STATS
-
-Engine statistics (sent every 2 seconds).
-
-```json
-{
-  "type": "ENGINE_STATS",
-  "stats": {
-    "active_downloads": 3,
-    "queued": 5,
-    "total_speed": 15728640
-  }
-}
-```
+- **GET** `/api/downloads/batches`: List batch summaries with pagination.
+- **GET** `/api/downloads/batch/:id/progress`: Get aggregated batch progress.
+- **POST** `/api/downloads/batch/:id/pause`: Pause all tasks in batch.
+- **POST** `/api/downloads/batch/:id/resume`: Resume all tasks in batch.
+- **POST** `/api/downloads/batch/:id/redownload`: Re-download entire batch.
+- **DELETE** `/api/downloads/batch/:id`: Delete entire batch.
 
 ---
 
-## Error Responses
+## Indexer API (`/api/indexer`)
 
-All endpoints return errors in this format:
+Flasharr acts as a **Newznab/Torznab** indexer for Sonarr/Radarr.
 
-```json
-{
-  "error": "Error message",
-  "code": "ERROR_CODE"
-}
-```
+### Integration Details
 
-### Common Error Codes
+- **URL**: `http://<host>:8484/api/indexer`
+- **API Key**: Required via `apikey` parameter.
+- **Supported Modes**: `caps`, `search`, `tvsearch`, `movie`.
 
-- `INVALID_REQUEST` - Malformed request body
-- `NOT_FOUND` - Resource not found
-- `FSHARE_ERROR` - Fshare API error
-- `DOWNLOAD_ERROR` - Download failed
-- `DATABASE_ERROR` - Database operation failed
+### NZB Download Route
 
-### HTTP Status Codes
+**GET** `/api/indexer/download`
 
-- `200` - Success
-- `201` - Created
-- `400` - Bad Request
-- `404` - Not Found
-- `500` - Internal Server Error
+Generates a "fake NZB" that encapsulates the Fshare URL and TMDB metadata for processing by the SABnzbd shim.
 
 ---
 
-## Rate Limiting
+## SABnzbd API (`/sabnzbd/api`)
 
-Currently, no rate limiting is enforced. For production deployments, consider implementing rate limiting at the reverse proxy level.
+Flasharr acts as a **SABnzbd-compatible** download client.
 
-## CORS
+### Integration Details
 
-CORS is enabled for all origins in development. For production, configure appropriate CORS settings.
+- **URL**: `http://<host>:8484/sabnzbd` (or `/sabnzbd/api`)
+- **API Key**: Required via `apikey` parameter.
+- **Flow**: Receives fake NZBs from the Indexer, extracts Fshare URLs, and starts real downloads.
 
----
+### Supported Modes
 
-## Examples
-
-### cURL Examples
-
-**Add Download:**
-
-```bash
-curl -X POST http://localhost:8484/api/downloads \
-  -H "Content-Type: application/json" \
-  -d '{"url": "https://fshare.vn/file/..."}'
-```
-
-**Pause Download:**
-
-```bash
-curl -X POST http://localhost:8484/api/downloads/{id}/pause
-```
-
-**Get Stats:**
-
-```bash
-curl http://localhost:8484/api/engine/stats
-```
-
-### JavaScript Examples
-
-**Add Download:**
-
-```javascript
-const response = await fetch("http://localhost:8484/api/downloads", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ url: "https://fshare.vn/file/..." }),
-});
-const task = await response.json();
-```
-
-**WebSocket Connection:**
-
-```javascript
-const ws = new WebSocket("ws://localhost:8484/api/ws");
-
-ws.onmessage = (event) => {
-  const message = JSON.parse(event.data);
-  console.log("Received:", message.type);
-};
-```
+- `addurl`: Add download via URL.
+- `addfile`: Add download via NZB upload (multipart).
+- `queue`: Get current queue status.
+- `history`: Get completed/failed items (with path mapping for host-side access).
+- `fullstatus`: Detailed engine status.
 
 ---
 
-For more details on WebSocket protocol, see [WebSocket Protocol Documentation](../architecture/websocket-protocol.md).
+## Search & Discovery API
+
+### Smart Search
+
+- **POST** `/api/smart-search/movie`: Movie search with TMDB enrichment and scoring.
+- **POST** `/api/smart-search/tv`: TV search (supports season/episode grouping).
+- **POST** `/api/smart-search/multi`: Cross-media search.
+
+### Discovery
+
+- **GET** `/api/discovery/trending`: Trending movies/shows.
+- **GET** `/api/discovery/popular`: Popular content.
+- **GET** `/api/tmdb/movie/:id`: Get movie metadata.
+- **GET** `/api/tmdb/tv/:id`: Get TV show metadata.
+
+---
+
+## System & Infrastructure API
+
+- **GET** `/health`: Basic health check (`{"status":"ok"}`).
+- **GET** `/api/stats`: Engine and system statistics (CPU, memory, active tasks).
+- **GET** `/api/system/config`: Current application configuration.
+- **GET** `/api/accounts`: Manage Fshare accounts and session status.
+- **GET** `/api/folder-source`: Manage timFshare folder sources.
+
+---
+
+## WebSocket Protocol (`/api/ws`)
+
+Flasharr uses WebSockets for real-time updates. See the dedicated [WebSocket Protocol](file:///Users/blavkbeav/Documents/Workspace/media-set/flasharr/docs/websocket-protocol.md) documentation for full details on message types and implementation.
+
+**Endpoint:** `ws://<host>:8484/api/ws`
+
+### Summary of Messages
+- `SYNC_ALL`: Initial sync of active tasks (`DOWNLOADING`/`STARTING`).
+- `TASK_BATCH_UPDATE`: High-frequency progress/state updates (500ms intervals).
+- `ENGINE_STATS`: Global speed and status counts.
+- `TASK_ADDED` / `TASK_REMOVED`: Membership changes.
+
+---
+
+## Error Codes
+
+Errors are returned as JSON: `{"error": "message"}`.
+
+- `401 Unauthorized`: Missing or invalid API key.
+- `404 Not Found`: Task or resource missing.
+- `409 Conflict`: Download URL already exists in queue.
+- `500 Internal Server Error`: Backend exception or database failure.

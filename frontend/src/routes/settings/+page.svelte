@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import SwitchAccountModal from "$lib/components/SwitchAccountModal.svelte";
-  import Badge from "$lib/components/ui/Badge.svelte";
+  import { Badge } from "@media-set/core-ui";
   import { get } from "svelte/store";
   import { goto } from "$app/navigation";
   import { accountStore } from "$lib/stores/account.svelte";
@@ -583,7 +583,7 @@
             <div class="inline-field">
               <span class="inline-label">KEY</span><span
                 class="inline-value mono"
-                >{showApiKey ? indexerApiKey : "•".repeat(12)}</span
+                >{indexerApiKey ? (showApiKey ? indexerApiKey : "•".repeat(12)) : "(no key — generating…)"}</span
               ><button
                 class="copy-inline-btn"
                 onclick={() => (showApiKey = !showApiKey)}
@@ -746,7 +746,7 @@
             <div class="inline-field">
               <span class="inline-label">KEY</span><span
                 class="inline-value mono"
-                >{showApiKey ? indexerApiKey : "•".repeat(12)}</span
+                >{indexerApiKey ? (showApiKey ? indexerApiKey : "•".repeat(12)) : "(no key — generating…)"}</span
               ><button
                 class="copy-inline-btn"
                 onclick={() => (showApiKey = !showApiKey)}
@@ -1526,24 +1526,6 @@
     color: rgba(255, 255, 255, 0.35);
     font-family: var(--font-mono, monospace);
   }
-  .acc-type-badge {
-    padding: 0.25rem 0.65rem;
-    border-radius: 6px;
-    font-size: 0.65rem;
-    font-weight: 900;
-    letter-spacing: 0.1em;
-    font-family: var(--font-mono, monospace);
-    background: rgba(255, 255, 255, 0.06);
-    color: rgba(255, 255, 255, 0.4);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    flex-shrink: 0;
-  }
-  .acc-type-badge.vip {
-    background: rgba(0, 243, 255, 0.1);
-    color: #00f3ff;
-    border-color: rgba(0, 243, 255, 0.3);
-  }
-
   .acc-card-actions {
     display: flex;
     gap: 0.4rem;
@@ -1959,23 +1941,6 @@
     color: #00f3ff;
   }
 
-  .info-badge {
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-    padding: 0.3rem 0.5rem;
-    background: rgba(0, 255, 163, 0.06);
-    border: 1px solid rgba(0, 255, 163, 0.15);
-    border-radius: 6px;
-    color: rgba(0, 255, 163, 0.8);
-    font-size: 0.6rem;
-    font-weight: 600;
-    font-family: var(--font-mono, monospace);
-  }
-  .info-badge .material-icons {
-    font-size: 0.85rem;
-  }
-
   .btn-regen {
     display: flex;
     align-items: center;
@@ -2326,24 +2291,6 @@
     .services-grid-3col {
       grid-template-columns: 1fr;
     }
-  }
-
-  .info-badge {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.75rem 1rem;
-    background: rgba(0, 243, 255, 0.05);
-    border: 1px solid rgba(0, 243, 255, 0.15);
-    border-radius: 10px;
-    color: var(--color-primary);
-    font-size: 0.85rem;
-    font-weight: 600;
-  }
-
-  .info-badge .material-icons {
-    font-size: 1.2rem;
-    color: var(--color-primary);
   }
 
   .service-icon {

@@ -8,7 +8,8 @@ use std::collections::{VecDeque, HashMap};
 use serde::Serialize;
 use quick_xml::Reader;
 use quick_xml::events::Event;
-use crate::db::{Db, CachedFolderItem};
+use crate::db::Db;
+use crate::db::sqlite::CachedFolderItem;
 use crate::api::folder_source::FolderSourceEntry;
 use crate::utils::parser::FilenameParser;
 use crate::services::tmdb_service::TmdbService;
@@ -408,7 +409,7 @@ impl FolderCacheService {
         let mut mapped_count = 0usize;
         let mut batch_mappings: Vec<(String, i64, String, String)> = Vec::new();
 
-        for (title_key, group) in &title_groups {
+        for (_title_key, group) in &title_groups {
             // Use the first item for context
             let sample = group[0];
             let media_type = if sample.category == "movie" { "movie" } else { "tv" };

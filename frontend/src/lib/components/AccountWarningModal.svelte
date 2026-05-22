@@ -1,9 +1,9 @@
 <script lang="ts">
   import { accountStore } from "$lib/stores/account.svelte";
   import { toasts } from "$lib/stores/toasts";
-  import Badge from "$lib/components/ui/Badge.svelte";
-  import Modal from "$lib/components/ui/Modal.svelte";
-  import Button from "$lib/components/ui/Button.svelte";
+  import { Badge } from "@media-set/core-ui";
+  import { Modal } from "@media-set/core-ui";
+  import { Button } from "@media-set/core-ui";
 
   let { onDismiss = () => {} }: { onDismiss?: () => void } = $props();
 
